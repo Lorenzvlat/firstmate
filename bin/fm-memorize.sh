@@ -36,6 +36,9 @@
 #   4  A write was attempted and its outcome is unconfirmed; do not retry automatically. The
 #      blocker distinguishes a write OpenBrain accepted without returning all three values, where
 #      the memory may already exist, from a receipt that proves nothing either way.
+#   129/130/143  The run was interrupted by SIGHUP, SIGINT, or SIGTERM. The workspace is removed
+#      and the run stops there rather than continuing without it; a write may already have been
+#      attempted, so its outcome is unconfirmed and it must not be retried automatically.
 set -u
 
 usage() {
@@ -92,7 +95,16 @@ work_dir=$(mktemp -d "${TMPDIR:-/tmp}/fm-memorize.XXXXXX") || fail "could not cr
 cleanup() {
   rm -rf "$work_dir"
 }
-trap cleanup EXIT HUP INT TERM
+interrupted() {
+  cleanup
+  trap - EXIT
+  printf 'fm-memorize: interrupted by %s; any OpenBrain write in flight is unconfirmed, so do not retry automatically\n' "$1" >&2
+  exit "$2"
+}
+trap cleanup EXIT
+trap 'interrupted SIGHUP 129' HUP
+trap 'interrupted SIGINT 130' INT
+trap 'interrupted SIGTERM 143' TERM
 chmod 700 "$work_dir" || fail "could not protect the isolated temporary directory" 3
 
 mcp_info=$(cd "$work_dir" && codex mcp get openbrain 2>/dev/null) || fail "Codex has no available openbrain MCP server" 3

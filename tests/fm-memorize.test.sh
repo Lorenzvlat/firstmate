@@ -326,6 +326,34 @@ test_unrecognized_read_tool_does_not_shadow_the_one_write() {
   pass "memorize counts only capture_thought and mutation tools against its one-write budget"
 }
 
+test_interrupting_signal_stops_the_run_and_cleans_up() {
+  local dir="$TMP_ROOT/signal" fakebin pid code work waited=0
+  fakebin=$(make_fixture signal)
+  PATH="$fakebin:/usr/bin:/bin" CAPTURE_DIR="$dir" OPENBRAIN_KEY='test-secret-value' \
+    FAKE_EXEC_MODE=hang FM_MEMORIZE_TIMEOUT_SECONDS=1 \
+    "$MEMORIZE" --title-file "$dir/title.txt" --body-file "$dir/body.txt" \
+    >"$dir/out" 2>"$dir/error" &
+  pid=$!
+  while [ ! -s "$dir/cwd" ] && [ "$waited" -lt 100 ]; do
+    sleep 0.1
+    waited=$((waited + 1))
+  done
+  [ -s "$dir/cwd" ] || fail "the memorize run never reached its Codex invocation"
+  work=$(cat "$dir/cwd")
+  kill -TERM "$pid" 2>/dev/null || fail "could not signal the memorize run"
+  set +e
+  wait "$pid"
+  code=$?
+  set -e
+  expect_code 143 "$code" "SIGTERM during a memorize run"
+  [ ! -e "$work" ] || fail "interrupted run left its temporary workspace behind: $work"
+  assert_contains "$(cat "$dir/error")" 'do not retry automatically' \
+    "interrupted run did not warn against an automatic retry"
+  assert_not_contains "$(cat "$dir/error")$(cat "$dir/out")" 'test-secret-value' \
+    "interrupted run leaked authentication value"
+  pass "memorize cleans up and terminates when its run is interrupted by a signal"
+}
+
 test_local_input_safety_and_skill_contract() {
   local dir="$TMP_ROOT/local-input" fakebin output code skill="$ROOT/.agents/skills/memorize/SKILL.md"
   fakebin=$(make_fixture local-input)
@@ -363,4 +391,5 @@ test_uncertain_or_invalid_receipt_never_claims_success
 test_completed_write_without_full_openbrain_detail_is_uncertain_not_retryable
 test_proven_absence_of_a_write_stays_retryable
 test_unrecognized_read_tool_does_not_shadow_the_one_write
+test_interrupting_signal_stops_the_run_and_cleans_up
 test_local_input_safety_and_skill_contract
