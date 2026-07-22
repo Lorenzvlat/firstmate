@@ -52,13 +52,15 @@ Do not retry the helper after exit code 4 because the write may have succeeded e
 
 ## Report the outcome
 
-On success, the helper prints one JSON object with the title it submitted (`submitted_title`) plus the `title`, `timestamp`, and `identifier` OpenBrain returned for the new memory.
-OpenBrain derives those three values itself, and the helper reports success only when its write result actually contained all three.
-Confirm the memory was saved and repeat the three returned values exactly as printed; never restate them from your own summary.
+On success, the helper prints one JSON object that leads with the title it submitted (`submitted_title`), followed by the `title`, `timestamp`, and `identifier` OpenBrain returned for the new memory.
+The helper reports success only when OpenBrain's own write result contained all three of those values.
+Lead the captain with `submitted_title`, which is the title you wrote, then give the `title`, `timestamp`, and `identifier` as raw OpenBrain fields quoted exactly as printed; never restate them from your own summary.
+OpenBrain derives its `title` automatically and may return a truncated restatement of the memory's opening text rather than the submitted title, so present it as the server's own value instead of correcting or paraphrasing it.
 
 If the helper reports that Codex, the configured `openbrain` MCP server, authentication, or the write is unavailable, report that concrete blocker and do not claim success.
 Exit code 3 means nothing was written, so the captain may ask for another attempt once the blocker is fixed.
 If the helper reports an unconfirmed or incomplete receipt, say that the outcome is uncertain and must not be retried under this invocation's one-write authorization.
+That includes a write OpenBrain accepted without returning all three values: the memory may already exist, so report it as unconfirmed rather than saved and leave any recheck or cleanup to the captain.
 Never expose raw Codex output, MCP diagnostics, credentials, secrets, or authentication values in the response.
 
 ## Harness applicability
