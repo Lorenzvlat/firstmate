@@ -45,17 +45,19 @@ bin/fm-memorize.sh --title-file "$temp_dir/title.txt" --body-file "$temp_dir/bod
 ```
 
 Remove the caller-created temporary directory after the helper returns.
-The helper owns a second isolated temporary directory for Codex, runs one ephemeral Codex client outside the Firstmate repository, loads the configured `openbrain` MCP server, hands the generated title and body to Codex as inert JSON data, suppresses raw client output, validates the receipt, and cleans up.
+The helper owns a second isolated temporary directory for Codex, runs one time-bounded ephemeral Codex client outside the Firstmate repository, loads the configured `openbrain` MCP server, joins the generated title and body into the single inert `content` value that OpenBrain's `capture_thought` tool takes, suppresses raw client output, validates the receipt against the recorded MCP call, and cleans up.
 The helper must be the only OpenBrain write path for this invocation.
 Do not invoke Codex or any MCP tool separately before or after it.
 Do not retry the helper after exit code 4 because the write may have succeeded even when its receipt was lost or invalid.
 
 ## Report the outcome
 
-On success, the helper prints one JSON object containing the title, timestamp, and identifier returned by OpenBrain.
-Confirm all three values to the captain in plain language.
+On success, the helper prints one JSON object with the title and body it submitted (`submitted_title`) plus the `title`, `timestamp`, and `identifier` OpenBrain returned for the new memory.
+OpenBrain derives those three values itself, so any of them the write result did not actually contain is reported as an empty string.
+Confirm the memory was saved and repeat the values that are present; never fill an empty field in from your own summary.
 
 If the helper reports that Codex, the configured `openbrain` MCP server, authentication, or the write is unavailable, report that concrete blocker and do not claim success.
+Exit code 3 means nothing was written, so the captain may ask for another attempt once the blocker is fixed.
 If the helper reports an unconfirmed or incomplete receipt, say that the outcome is uncertain and must not be retried under this invocation's one-write authorization.
 Never expose raw Codex output, MCP diagnostics, credentials, secrets, or authentication values in the response.
 
