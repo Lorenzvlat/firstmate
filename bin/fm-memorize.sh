@@ -16,8 +16,10 @@
 # A `capture_thought` call that completes cleanly but whose result omits any of the three is
 # therefore reported as unconfirmed (exit 4), not as success: the memory may well have been saved,
 # which is exactly why the caller must not retry it automatically. That case says so explicitly
-# ("the memory may already exist") to separate it from a receipt that is malformed, invented, or
-# otherwise contradicted by the recorded events, where nothing about the outcome is known.
+# ("the memory may already exist") and names the required values OpenBrain left unconfirmed, which
+# separates it from a receipt that is malformed, invented, or otherwise contradicted by the
+# recorded events, where nothing about the outcome is known.
+# Only those field names are reported, never any value or other part of the response.
 #
 # Usage:
 #   bin/fm-memorize.sh --title-file <path> --body-file <path>
@@ -194,13 +196,13 @@ codex_status=0
   exit $?
 ) || codex_status=$?
 
-python3 - "$work_dir/receipt.json" "$work_dir/events.jsonl" "$work_dir/payload.json" <<'PY'
+python3 - "$work_dir/receipt.json" "$work_dir/events.jsonl" "$work_dir/payload.json" "$work_dir/missing.txt" <<'PY'
 import json
 import pathlib
 import re
 import sys
 
-receipt_path, events_path, payload_path = map(pathlib.Path, sys.argv[1:])
+receipt_path, events_path, payload_path, missing_path = map(pathlib.Path, sys.argv[1:])
 NO_WRITE = 3
 UNCONFIRMED = 4
 ACCEPTED_WITHOUT_DETAIL = 5
@@ -316,6 +318,10 @@ for key in ("title", "timestamp", "identifier"):
         raise SystemExit(UNCONFIRMED)
     confirmed[key] = value
 if missing:
+    try:
+        missing_path.write_text(", ".join(missing), encoding="utf-8")
+    except OSError:
+        pass
     raise SystemExit(ACCEPTED_WITHOUT_DETAIL)
 
 print(json.dumps({
@@ -336,7 +342,11 @@ case "$verdict" in
     fail "Codex attempted no OpenBrain write; nothing was saved and it is safe to retry" 3
     ;;
   5)
-    fail "OpenBrain accepted the write but returned no confirmable title, timestamp, and identifier; the memory may already exist, so do not retry automatically" 4
+    missing_fields=$(cat "$work_dir/missing.txt" 2>/dev/null)
+    case "$missing_fields" in
+      ''|*[!a-z,\ ]*) missing_fields="title, timestamp, identifier" ;;
+    esac
+    fail "OpenBrain accepted the write but its result did not confirm these required values: $missing_fields; the memory may already exist, so do not retry automatically" 4
     ;;
   *) fail "the OpenBrain write is unconfirmed; do not retry automatically" 4 ;;
 esac

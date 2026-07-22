@@ -86,6 +86,7 @@ case "${FAKE_EXEC_MODE:-success}" in
   malformed) printf 'not json\n' > "$output" ;;
   partial) printf '%s\n' '{"success":true,"title":"Returned title","timestamp":"","identifier":"","blocker":""}' > "$output" ;;
   no-identifier) printf '%s\n' '{"success":true,"title":"Returned title","timestamp":"2026-03-12T10:11:12Z","identifier":"","blocker":""}' > "$output" ;;
+  no-detail) printf '%s\n' '{"success":true,"title":"","timestamp":"","identifier":"","blocker":""}' > "$output" ;;
   ungrounded) printf '%s\n' '{"success":true,"title":"Invented title","timestamp":"1999-01-01T00:00:00Z","identifier":"mem-999","blocker":""}' > "$output" ;;
   rejected) printf '%s\n' '{"success":false,"title":"","timestamp":"","identifier":"","blocker":"authentication rejected"}' > "$output" ;;
   *) printf '%s\n' '{"success":true,"title":"Returned title","timestamp":"2026-03-12T10:11:12Z","identifier":"mem-123","blocker":""}' > "$output" ;;
@@ -246,8 +247,12 @@ test_uncertain_or_invalid_receipt_never_claims_success() {
 }
 
 test_completed_write_without_full_openbrain_detail_is_uncertain_not_retryable() {
-  local mode dir fakebin output code
-  for mode in partial no-identifier; do
+  local spec mode expected confirmed dir fakebin output code
+  for spec in 'no-identifier|identifier|timestamp' 'partial|timestamp, identifier|title' 'no-detail|title, timestamp, identifier|'; do
+    mode=${spec%%|*}
+    expected=${spec#*|}
+    confirmed=${expected#*|}
+    expected=${expected%%|*}
     dir="$TMP_ROOT/detail-$mode"
     fakebin=$(make_fixture "detail-$mode")
     set +e
@@ -255,13 +260,19 @@ test_completed_write_without_full_openbrain_detail_is_uncertain_not_retryable() 
     code=$?
     set -e
     expect_code 4 "$code" "clean capture_thought whose result omitted OpenBrain detail ($mode)"
+    assert_contains "$output" "did not confirm these required values: $expected;" \
+      "$mode detail gap did not name exactly the missing required fields"
     assert_contains "$output" 'the memory may already exist' "$mode detail gap is indistinguishable from an unknown outcome"
     assert_contains "$output" 'do not retry automatically' "$mode detail gap invited an automatic retry of a possible write"
     assert_not_contains "$output" 'safe to retry' "$mode detail gap was reported as a proven absent write"
-    assert_not_contains "$output" 'Returned title' "$mode detail gap claimed a confirmed memory"
+    assert_not_contains "$output" 'Returned title' "$mode detail gap disclosed a receipt value"
+    assert_not_contains "$output" '2026-03-12T10:11:12Z' "$mode detail gap disclosed a receipt value"
     assert_not_contains "$output" 'test-secret-value' "$mode detail gap leaked authentication value"
+    if [ -n "$confirmed" ]; then
+      assert_not_contains "$output" "$confirmed" "$mode detail gap named a field OpenBrain did confirm"
+    fi
   done
-  pass "memorize reports a clean write with missing OpenBrain detail as probably saved but unconfirmed"
+  pass "memorize names the unconfirmed OpenBrain fields and reports the write as probably saved but uncertain"
 }
 
 test_proven_absence_of_a_write_stays_retryable() {
