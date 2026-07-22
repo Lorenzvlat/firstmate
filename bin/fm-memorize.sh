@@ -15,7 +15,9 @@
 # when all three are present in the recorded MCP result rather than asserted by the model.
 # A `capture_thought` call that completes cleanly but whose result omits any of the three is
 # therefore reported as unconfirmed (exit 4), not as success: the memory may well have been saved,
-# which is exactly why the caller must not retry it automatically.
+# which is exactly why the caller must not retry it automatically. That case says so explicitly
+# ("the memory may already exist") to separate it from a receipt that is malformed, invented, or
+# otherwise contradicted by the recorded events, where nothing about the outcome is known.
 #
 # Usage:
 #   bin/fm-memorize.sh --title-file <path> --body-file <path>
@@ -29,8 +31,9 @@
 #   2  Invalid local input or usage.
 #   3  Nothing was written: Codex, the openbrain MCP server, or authentication was unavailable, or
 #      Codex attempted no OpenBrain write at all. Retrying after the blocker is fixed is safe.
-#   4  A write was attempted and its outcome is unconfirmed, including a write that completed
-#      cleanly without returning all three values; do not retry automatically.
+#   4  A write was attempted and its outcome is unconfirmed; do not retry automatically. The
+#      blocker distinguishes a write OpenBrain accepted without returning all three values, where
+#      the memory may already exist, from a receipt that proves nothing either way.
 set -u
 
 usage() {
@@ -152,10 +155,10 @@ Do not edit, summarize, translate, or truncate that value.
 Do not call any update or delete tool.
 Do not make more than one write-capable MCP call, and do not retry after any response, timeout, ambiguity, or error because the first write may have succeeded.
 Do not use shell or network tools to transmit the payload.
-On confirmed success, return success=true with blocker empty, and copy the title, timestamp, and identifier verbatim from the capture_thought result.
-OpenBrain derives those three values itself, so if the result does not contain all of them, return success=false with a short blocker naming what was missing, and still do not call the tool again.
-Do not infer, reformat, or invent receipt fields.
-On any configuration, authentication, tool, write, or receipt failure, return success=false with empty title, timestamp, and identifier and a short blocker that contains no credential or secret value.
+Once capture_thought answers without an error, return success=true with blocker empty, and copy the title, timestamp, and identifier verbatim from its result.
+OpenBrain derives those three values itself, so return an empty string for any of them the result does not contain, and never call the tool again to look for them.
+Do not infer, reformat, or invent receipt fields; the caller treats an empty field as missing evidence rather than as your failure.
+On any configuration, authentication, tool, or write failure, return success=false with empty title, timestamp, and identifier and a short blocker that contains no credential or secret value.
 EOF
 
 codex_status=0
@@ -200,6 +203,7 @@ import sys
 receipt_path, events_path, payload_path = map(pathlib.Path, sys.argv[1:])
 NO_WRITE = 3
 UNCONFIRMED = 4
+ACCEPTED_WITHOUT_DETAIL = 5
 WRITE_TOOL = "capture_thought"
 MUTATION_NAME = re.compile(
     r"create|capture|add|append|insert|store|save|remember|write|update|edit|patch|"
@@ -303,11 +307,16 @@ def collect(node, found, depth=0):
 strings = []
 collect(result, strings)
 confirmed = {}
+missing = []
 for key in ("title", "timestamp", "identifier"):
     value = receipt[key].strip()
-    if not value or not any(value in text for text in strings):
+    if not value:
+        missing.append(key)
+    elif not any(value in text for text in strings):
         raise SystemExit(UNCONFIRMED)
     confirmed[key] = value
+if missing:
+    raise SystemExit(ACCEPTED_WITHOUT_DETAIL)
 
 print(json.dumps({
     "submitted_title": payload.get("title", ""),
@@ -325,6 +334,9 @@ case "$verdict" in
       fail "Codex could not complete the OpenBrain memorize run and attempted no write; nothing was saved and it is safe to retry" 3
     fi
     fail "Codex attempted no OpenBrain write; nothing was saved and it is safe to retry" 3
+    ;;
+  5)
+    fail "OpenBrain accepted the write but returned no confirmable title, timestamp, and identifier; the memory may already exist, so do not retry automatically" 4
     ;;
   *) fail "the OpenBrain write is unconfirmed; do not retry automatically" 4 ;;
 esac
