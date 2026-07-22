@@ -13,6 +13,9 @@
 #
 # OpenBrain derives a memory's title, timestamp, and identifier itself, so success is reported only
 # when all three are present in the recorded MCP result rather than asserted by the model.
+# A `capture_thought` call that completes cleanly but whose result omits any of the three is
+# therefore reported as unconfirmed (exit 4), not as success: the memory may well have been saved,
+# which is exactly why the caller must not retry it automatically.
 #
 # Usage:
 #   bin/fm-memorize.sh --title-file <path> --body-file <path>
@@ -26,7 +29,8 @@
 #   2  Invalid local input or usage.
 #   3  Nothing was written: Codex, the openbrain MCP server, or authentication was unavailable, or
 #      Codex attempted no OpenBrain write at all. Retrying after the blocker is fixed is safe.
-#   4  A write was attempted and its outcome is unconfirmed; do not retry automatically.
+#   4  A write was attempted and its outcome is unconfirmed, including a write that completed
+#      cleanly without returning all three values; do not retry automatically.
 set -u
 
 usage() {

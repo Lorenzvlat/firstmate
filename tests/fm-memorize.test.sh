@@ -85,6 +85,7 @@ case "${FAKE_EXEC_MODE:-success}" in
   fail) exit 9 ;;
   malformed) printf 'not json\n' > "$output" ;;
   partial) printf '%s\n' '{"success":true,"title":"Returned title","timestamp":"","identifier":"","blocker":""}' > "$output" ;;
+  no-identifier) printf '%s\n' '{"success":true,"title":"Returned title","timestamp":"2026-03-12T10:11:12Z","identifier":"","blocker":""}' > "$output" ;;
   ungrounded) printf '%s\n' '{"success":true,"title":"Invented title","timestamp":"1999-01-01T00:00:00Z","identifier":"mem-999","blocker":""}' > "$output" ;;
   rejected) printf '%s\n' '{"success":false,"title":"","timestamp":"","identifier":"","blocker":"authentication rejected"}' > "$output" ;;
   *) printf '%s\n' '{"success":true,"title":"Returned title","timestamp":"2026-03-12T10:11:12Z","identifier":"mem-123","blocker":""}' > "$output" ;;
@@ -108,6 +109,10 @@ test_success_is_isolated_ephemeral_and_returns_validated_receipt() {
   fakebin=$(make_fixture success)
   output=$(run_helper "$dir" "$fakebin" 2>"$dir/error") || fail "successful write fixture failed: $(cat "$dir/error")"
   assert_contains "$output" '"submitted_title":"Conversation outcome"' "success receipt omitted the submitted title"
+  case "$output" in
+    '{"submitted_title"'*) : ;;
+    *) fail "success receipt does not lead with the submitted title: $output" ;;
+  esac
   assert_contains "$output" '"title":"Returned title"' "success receipt omitted the OpenBrain title"
   assert_contains "$output" '"timestamp":"2026-03-12T10:11:12Z"' "success receipt omitted timestamp"
   assert_contains "$output" '"identifier":"mem-123"' "success receipt omitted identifier"
@@ -212,7 +217,7 @@ test_configuration_and_authentication_fail_before_write() {
 
 test_uncertain_or_invalid_receipt_never_claims_success() {
   local mode dir fakebin output code
-  for mode in fail malformed ungrounded partial rejected; do
+  for mode in fail malformed ungrounded rejected; do
     dir="$TMP_ROOT/receipt-$mode"
     fakebin=$(make_fixture "receipt-$mode")
     set +e
@@ -235,7 +240,26 @@ test_uncertain_or_invalid_receipt_never_claims_success() {
     assert_contains "$output" 'do not retry automatically' "$mode MCP evidence did not preserve one-write uncertainty"
     assert_not_contains "$output" 'Returned title' "$mode MCP evidence claimed a successful write"
   done
-  pass "memorize refuses success after invented, partial, or failed receipts, unfinished, mutating, or duplicate writes"
+  pass "memorize refuses success after invented or failed receipts, unfinished, mutating, or duplicate writes"
+}
+
+test_completed_write_without_full_openbrain_detail_is_uncertain_not_retryable() {
+  local mode dir fakebin output code
+  for mode in partial no-identifier; do
+    dir="$TMP_ROOT/detail-$mode"
+    fakebin=$(make_fixture "detail-$mode")
+    set +e
+    output=$(FAKE_EXEC_MODE="$mode" run_helper "$dir" "$fakebin" 2>&1)
+    code=$?
+    set -e
+    expect_code 4 "$code" "clean capture_thought whose result omitted OpenBrain detail ($mode)"
+    assert_contains "$output" 'do not retry automatically' "$mode detail gap invited an automatic retry of a possible write"
+    assert_not_contains "$output" 'safe to retry' "$mode detail gap was reported as a proven absent write"
+    assert_not_contains "$output" 'Returned title' "$mode detail gap claimed a confirmed memory"
+  done
+  assert_grep 'without returning all three values' "$ROOT/bin/fm-memorize.sh" \
+    "helper does not document that an incompletely reported write stays unconfirmed"
+  pass "memorize reports a clean write with missing OpenBrain detail as unconfirmed and unretryable"
 }
 
 test_proven_absence_of_a_write_stays_retryable() {
@@ -310,6 +334,9 @@ test_local_input_safety_and_skill_contract() {
   assert_grep 'does not authorize updating or deleting' "$skill" "skill does not protect existing memories"
   assert_grep 'Do not invent facts' "$skill" "skill does not forbid invented memory facts"
   assert_grep 'never restate them from your own summary' "$skill" "skill permits reporting unconfirmed OpenBrain detail"
+  assert_grep 'Lead the captain with `submitted_title`' "$skill" "skill does not lead the captain with the submitted title"
+  assert_grep 'a write OpenBrain accepted without returning all three values' "$skill" \
+    "skill does not tell the captain an incompletely reported write is unconfirmed"
   assert_grep 'Do not retry the helper after exit code 4' "$skill" "skill permits accidental duplicate writes"
   pass "memorize rejects unsafe inputs and declares its user-facing one-write contract"
 }
@@ -318,6 +345,7 @@ test_success_is_isolated_ephemeral_and_returns_validated_receipt
 test_payload_is_one_inert_content_value_not_shell_or_arguments
 test_configuration_and_authentication_fail_before_write
 test_uncertain_or_invalid_receipt_never_claims_success
+test_completed_write_without_full_openbrain_detail_is_uncertain_not_retryable
 test_proven_absence_of_a_write_stays_retryable
 test_unrecognized_read_tool_does_not_shadow_the_one_write
 test_local_input_safety_and_skill_contract
