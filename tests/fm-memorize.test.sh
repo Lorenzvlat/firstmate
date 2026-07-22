@@ -45,21 +45,30 @@ if [ "${FAKE_EXEC_MODE:-success}" = hang ]; then
   sleep 30
   exit 0
 fi
-captured='{"content":[{"type":"text","text":"Thought captured.\nTitle: Returned title\nID: mem-123\nCaptured: 2026-03-12T10:11:12Z"}],"isError":false}'
+captured='{"content":[{"type":"text","text":"Thought captured.\nTitle: Returned title\nID: mem-123\nCaptured: 2026-03-12T10:11:12Z"}],"structured_content":null}'
+started='{"type":"item.started","item":{"id":"item-1","type":"mcp_tool_call","server":"openbrain","tool":"capture_thought","status":"in_progress"}}'
+completed="{\"type\":\"item.completed\",\"item\":{\"id\":\"item-1\",\"type\":\"mcp_tool_call\",\"server\":\"openbrain\",\"tool\":\"capture_thought\",\"arguments\":{\"content\":\"inert data\"},\"result\":$captured,\"error\":null,\"status\":\"completed\"}}"
 printf '%s\n' '{"type":"diagnostic","message":"sensitive model detail"}'
 case "${FAKE_EVENT_MODE:-capture}" in
   none) : ;;
-  readonly) printf '%s\n' '{"type":"item.completed","item":{"id":"item-1","type":"mcp_tool_call","server":"openbrain","tool":"search_thoughts","result":{"content":[{"type":"text","text":"no matches"}],"isError":false},"error":null}}' ;;
-  started) printf '%s\n' '{"type":"item.started","item":{"id":"item-1","type":"mcp_tool_call","server":"openbrain","tool":"capture_thought"}}' ;;
-  update) printf '%s\n' "{\"type\":\"item.completed\",\"item\":{\"id\":\"item-1\",\"type\":\"mcp_tool_call\",\"server\":\"openbrain\",\"tool\":\"update_thought\",\"result\":$captured,\"error\":null}}" ;;
-  error) printf '%s\n' '{"type":"item.completed","item":{"id":"item-1","type":"mcp_tool_call","server":"openbrain","tool":"capture_thought","result":{"content":[{"type":"text","text":"capture failed"}],"isError":true},"error":null}}' ;;
+  readonly) printf '%s\n' '{"type":"item.completed","item":{"id":"item-1","type":"mcp_tool_call","server":"openbrain","tool":"search_thoughts","result":{"content":[{"type":"text","text":"no matches"}],"structured_content":null},"error":null,"status":"completed"}}' ;;
+  started) printf '%s\n' "$started" ;;
+  update) printf '%s\n' "{\"type\":\"item.completed\",\"item\":{\"id\":\"item-1\",\"type\":\"mcp_tool_call\",\"server\":\"openbrain\",\"tool\":\"update_thought\",\"result\":$captured,\"error\":null,\"status\":\"completed\"}}" ;;
+  forget) printf '%s\n' "{\"type\":\"item.completed\",\"item\":{\"id\":\"item-1\",\"type\":\"mcp_tool_call\",\"server\":\"openbrain\",\"tool\":\"forget_thought\",\"result\":$captured,\"error\":null,\"status\":\"completed\"}}" ;;
+  failed-status) printf '%s\n' "{\"type\":\"item.completed\",\"item\":{\"id\":\"item-1\",\"type\":\"mcp_tool_call\",\"server\":\"openbrain\",\"tool\":\"capture_thought\",\"result\":$captured,\"error\":null,\"status\":\"failed\"}}" ;;
+  error) printf '%s\n' '{"type":"item.completed","item":{"id":"item-1","type":"mcp_tool_call","server":"openbrain","tool":"capture_thought","result":{"content":[{"type":"text","text":"capture failed"}],"isError":true},"error":null,"status":"completed"}}' ;;
   duplicate)
-    printf '%s\n' "{\"type\":\"item.completed\",\"item\":{\"id\":\"item-1\",\"type\":\"mcp_tool_call\",\"server\":\"openbrain\",\"tool\":\"capture_thought\",\"result\":$captured,\"error\":null}}"
-    printf '%s\n' "{\"type\":\"item.completed\",\"item\":{\"id\":\"item-2\",\"type\":\"mcp_tool_call\",\"server\":\"openbrain\",\"tool\":\"capture_thought\",\"result\":$captured,\"error\":null}}"
+    printf '%s\n' "$completed"
+    printf '%s\n' "{\"type\":\"item.completed\",\"item\":{\"id\":\"item-2\",\"type\":\"mcp_tool_call\",\"server\":\"openbrain\",\"tool\":\"capture_thought\",\"result\":$captured,\"error\":null,\"status\":\"completed\"}}"
+    ;;
+  unknown-read)
+    printf '%s\n' '{"type":"item.completed","item":{"id":"item-0","type":"mcp_tool_call","server":"openbrain","tool":"related_thoughts","result":{"content":[{"type":"text","text":"none"}],"structured_content":null},"error":null,"status":"completed"}}'
+    printf '%s\n' "$started"
+    printf '%s\n' "$completed"
     ;;
   *)
-    printf '%s\n' '{"type":"item.started","item":{"id":"item-1","type":"mcp_tool_call","server":"openbrain","tool":"capture_thought"}}'
-    printf '%s\n' "{\"type\":\"item.completed\",\"item\":{\"id\":\"item-1\",\"type\":\"mcp_tool_call\",\"server\":\"openbrain\",\"tool\":\"capture_thought\",\"arguments\":{\"content\":\"inert data\"},\"result\":$captured,\"error\":null}}"
+    printf '%s\n' "$started"
+    printf '%s\n' "$completed"
     ;;
 esac
 printf 'sensitive stderr OPENBRAIN_KEY=%s\n' "${OPENBRAIN_KEY:-}" >&2
@@ -203,7 +212,7 @@ test_configuration_and_authentication_fail_before_write() {
 
 test_uncertain_or_invalid_receipt_never_claims_success() {
   local mode dir fakebin output code
-  for mode in fail malformed ungrounded rejected; do
+  for mode in fail malformed ungrounded partial rejected; do
     dir="$TMP_ROOT/receipt-$mode"
     fakebin=$(make_fixture "receipt-$mode")
     set +e
@@ -215,7 +224,7 @@ test_uncertain_or_invalid_receipt_never_claims_success() {
     assert_not_contains "$output" 'test-secret-value' "$mode result leaked authentication value"
     assert_not_contains "$output" 'Returned title' "$mode result claimed a successful write"
   done
-  for mode in started update duplicate error; do
+  for mode in started update forget duplicate error failed-status; do
     dir="$TMP_ROOT/event-$mode"
     fakebin=$(make_fixture "event-$mode")
     set +e
@@ -226,7 +235,7 @@ test_uncertain_or_invalid_receipt_never_claims_success() {
     assert_contains "$output" 'do not retry automatically' "$mode MCP evidence did not preserve one-write uncertainty"
     assert_not_contains "$output" 'Returned title' "$mode MCP evidence claimed a successful write"
   done
-  pass "memorize refuses success after invented or failed receipts, unfinished, mutating, or duplicate writes"
+  pass "memorize refuses success after invented, partial, or failed receipts, unfinished, mutating, or duplicate writes"
 }
 
 test_proven_absence_of_a_write_stays_retryable() {
@@ -271,16 +280,13 @@ test_proven_absence_of_a_write_stays_retryable() {
   pass "memorize bounds the Codex run and reports a proven absent write as retryable"
 }
 
-test_success_reports_only_server_confirmed_detail() {
-  local dir="$TMP_ROOT/partial" fakebin output
-  fakebin=$(make_fixture partial)
-  output=$(FAKE_EXEC_MODE=partial run_helper "$dir" "$fakebin" 2>"$dir/error") || \
-    fail "partial-detail write fixture failed: $(cat "$dir/error")"
-  assert_contains "$output" '"submitted_title":"Conversation outcome"' "partial receipt omitted the submitted title"
-  assert_contains "$output" '"title":"Returned title"' "partial receipt omitted the confirmed title"
-  assert_contains "$output" '"timestamp":""' "partial receipt invented a timestamp"
-  assert_contains "$output" '"identifier":""' "partial receipt invented an identifier"
-  pass "memorize confirms the write while leaving unreturned OpenBrain detail empty"
+test_unrecognized_read_tool_does_not_shadow_the_one_write() {
+  local dir="$TMP_ROOT/unknown-read" fakebin output
+  fakebin=$(make_fixture unknown-read)
+  output=$(FAKE_EVENT_MODE=unknown-read run_helper "$dir" "$fakebin" 2>"$dir/error") || \
+    fail "unknown read tool fixture failed: $(cat "$dir/error")"
+  assert_contains "$output" '"identifier":"mem-123"' "an unrecognized non-mutating tool call masked a confirmed write"
+  pass "memorize counts only capture_thought and mutation tools against its one-write budget"
 }
 
 test_local_input_safety_and_skill_contract() {
@@ -303,7 +309,7 @@ test_local_input_safety_and_skill_contract() {
   assert_grep 'one new OpenBrain write only' "$skill" "skill does not bound captain authorization"
   assert_grep 'does not authorize updating or deleting' "$skill" "skill does not protect existing memories"
   assert_grep 'Do not invent facts' "$skill" "skill does not forbid invented memory facts"
-  assert_grep 'never fill an empty field in from your own summary' "$skill" "skill permits reporting unconfirmed OpenBrain detail"
+  assert_grep 'never restate them from your own summary' "$skill" "skill permits reporting unconfirmed OpenBrain detail"
   assert_grep 'Do not retry the helper after exit code 4' "$skill" "skill permits accidental duplicate writes"
   pass "memorize rejects unsafe inputs and declares its user-facing one-write contract"
 }
@@ -313,5 +319,5 @@ test_payload_is_one_inert_content_value_not_shell_or_arguments
 test_configuration_and_authentication_fail_before_write
 test_uncertain_or_invalid_receipt_never_claims_success
 test_proven_absence_of_a_write_stays_retryable
-test_success_reports_only_server_confirmed_detail
+test_unrecognized_read_tool_does_not_shadow_the_one_write
 test_local_input_safety_and_skill_contract

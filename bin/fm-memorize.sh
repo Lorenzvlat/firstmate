@@ -11,8 +11,8 @@
 # Codex stdout and stderr stay private because they may contain model or authentication detail.
 # Only a validated success receipt or a stable blocker is printed.
 #
-# OpenBrain derives a memory's title, timestamp, and identifier itself, so any of those values is
-# reported only when the recorded MCP result actually contains it.
+# OpenBrain derives a memory's title, timestamp, and identifier itself, so success is reported only
+# when all three are present in the recorded MCP result rather than asserted by the model.
 #
 # Usage:
 #   bin/fm-memorize.sh --title-file <path> --body-file <path>
@@ -21,7 +21,8 @@
 #   FM_MEMORIZE_TIMEOUT_SECONDS  Wall-clock bound on the Codex invocation (default 300).
 #
 # Exit codes:
-#   0  OpenBrain recorded the new memory; the confirmed detail it returned is printed as JSON.
+#   0  OpenBrain recorded the new memory and returned its title, timestamp, and identifier, which
+#      are printed as JSON.
 #   2  Invalid local input or usage.
 #   3  Nothing was written: Codex, the openbrain MCP server, or authentication was unavailable, or
 #      Codex attempted no OpenBrain write at all. Retrying after the blocker is fixed is safe.
@@ -148,7 +149,7 @@ Do not call any update or delete tool.
 Do not make more than one write-capable MCP call, and do not retry after any response, timeout, ambiguity, or error because the first write may have succeeded.
 Do not use shell or network tools to transmit the payload.
 On confirmed success, return success=true with blocker empty, and copy the title, timestamp, and identifier verbatim from the capture_thought result.
-OpenBrain derives those values itself, so return an empty string for any of them the result does not actually contain.
+OpenBrain derives those three values itself, so if the result does not contain all of them, return success=false with a short blocker naming what was missing, and still do not call the tool again.
 Do not infer, reformat, or invent receipt fields.
 On any configuration, authentication, tool, write, or receipt failure, return success=false with empty title, timestamp, and identifier and a short blocker that contains no credential or secret value.
 EOF
@@ -189,13 +190,24 @@ codex_status=0
 python3 - "$work_dir/receipt.json" "$work_dir/events.jsonl" "$work_dir/payload.json" <<'PY'
 import json
 import pathlib
+import re
 import sys
 
 receipt_path, events_path, payload_path = map(pathlib.Path, sys.argv[1:])
 NO_WRITE = 3
 UNCONFIRMED = 4
-READ_ONLY_TOOLS = {"fetch", "list_thoughts", "search", "search_thoughts", "thought_stats"}
 WRITE_TOOL = "capture_thought"
+MUTATION_NAME = re.compile(
+    r"create|capture|add|append|insert|store|save|remember|write|update|edit|patch|"
+    r"modify|upsert|delete|remove|forget|purge|merge",
+    re.IGNORECASE,
+)
+
+
+def is_write_attempt(tool):
+    if not isinstance(tool, str) or not tool.strip():
+        return True
+    return tool == WRITE_TOOL or bool(MUTATION_NAME.search(tool))
 
 events = []
 events_complete = True
@@ -225,8 +237,7 @@ for event in events:
         continue
     if item.get("type") != "mcp_tool_call" or item.get("server") != "openbrain":
         continue
-    tool = item.get("tool")
-    if isinstance(tool, str) and tool in READ_ONLY_TOOLS:
+    if not is_write_attempt(item.get("tool")):
         continue
     attempts.append((event.get("type"), item))
 
@@ -241,6 +252,8 @@ if len(completed) != 1:
     raise SystemExit(UNCONFIRMED)
 call = completed[0]
 if call.get("tool") != WRITE_TOOL or call.get("error") not in (None, ""):
+    raise SystemExit(UNCONFIRMED)
+if call.get("status") not in (None, "completed"):
     raise SystemExit(UNCONFIRMED)
 result = call.get("result")
 if isinstance(result, dict) and result.get("isError"):
@@ -288,7 +301,7 @@ collect(result, strings)
 confirmed = {}
 for key in ("title", "timestamp", "identifier"):
     value = receipt[key].strip()
-    if value and not any(value in text for text in strings):
+    if not value or not any(value in text for text in strings):
         raise SystemExit(UNCONFIRMED)
     confirmed[key] = value
 
