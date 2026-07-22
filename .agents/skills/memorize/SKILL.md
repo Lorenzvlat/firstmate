@@ -52,9 +52,9 @@ Do not retry the helper after exit code 4 because the write may have succeeded e
 
 ## Report the outcome
 
-On success, the helper prints one JSON object with the title and body it submitted (`submitted_title`) plus the `title`, `timestamp`, and `identifier` OpenBrain returned for the new memory.
-OpenBrain derives those three values itself, so any of them the write result did not actually contain is reported as an empty string.
-Confirm the memory was saved and repeat the values that are present; never fill an empty field in from your own summary.
+On success, the helper prints one JSON object with the title it submitted (`submitted_title`) plus the `title`, `timestamp`, and `identifier` OpenBrain returned for the new memory.
+OpenBrain derives those three values itself, and the helper reports success only when its write result actually contained all three.
+Confirm the memory was saved and repeat the three returned values exactly as printed; never restate them from your own summary.
 
 If the helper reports that Codex, the configured `openbrain` MCP server, authentication, or the write is unavailable, report that concrete blocker and do not claim success.
 Exit code 3 means nothing was written, so the captain may ask for another attempt once the blocker is fixed.
