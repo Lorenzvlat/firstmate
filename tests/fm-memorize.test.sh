@@ -228,6 +228,7 @@ test_uncertain_or_invalid_receipt_never_claims_success() {
     assert_contains "$output" 'do not retry automatically' "$mode result did not preserve one-write uncertainty"
     assert_not_contains "$output" 'test-secret-value' "$mode result leaked authentication value"
     assert_not_contains "$output" 'Returned title' "$mode result claimed a successful write"
+    assert_not_contains "$output" 'may already exist' "$mode result implied the memory was probably created"
   done
   for mode in started update forget duplicate error failed-status; do
     dir="$TMP_ROOT/event-$mode"
@@ -239,6 +240,7 @@ test_uncertain_or_invalid_receipt_never_claims_success() {
     expect_code 4 "$code" "$mode MCP event evidence"
     assert_contains "$output" 'do not retry automatically' "$mode MCP evidence did not preserve one-write uncertainty"
     assert_not_contains "$output" 'Returned title' "$mode MCP evidence claimed a successful write"
+    assert_not_contains "$output" 'may already exist' "$mode MCP evidence implied the memory was probably created"
   done
   pass "memorize refuses success after invented or failed receipts, unfinished, mutating, or duplicate writes"
 }
@@ -253,13 +255,13 @@ test_completed_write_without_full_openbrain_detail_is_uncertain_not_retryable() 
     code=$?
     set -e
     expect_code 4 "$code" "clean capture_thought whose result omitted OpenBrain detail ($mode)"
+    assert_contains "$output" 'the memory may already exist' "$mode detail gap is indistinguishable from an unknown outcome"
     assert_contains "$output" 'do not retry automatically' "$mode detail gap invited an automatic retry of a possible write"
     assert_not_contains "$output" 'safe to retry' "$mode detail gap was reported as a proven absent write"
     assert_not_contains "$output" 'Returned title' "$mode detail gap claimed a confirmed memory"
+    assert_not_contains "$output" 'test-secret-value' "$mode detail gap leaked authentication value"
   done
-  assert_grep 'without returning all three values' "$ROOT/bin/fm-memorize.sh" \
-    "helper does not document that an incompletely reported write stays unconfirmed"
-  pass "memorize reports a clean write with missing OpenBrain detail as unconfirmed and unretryable"
+  pass "memorize reports a clean write with missing OpenBrain detail as probably saved but unconfirmed"
 }
 
 test_proven_absence_of_a_write_stays_retryable() {
@@ -335,8 +337,10 @@ test_local_input_safety_and_skill_contract() {
   assert_grep 'Do not invent facts' "$skill" "skill does not forbid invented memory facts"
   assert_grep 'never restate them from your own summary' "$skill" "skill permits reporting unconfirmed OpenBrain detail"
   assert_grep 'Lead the captain with `submitted_title`' "$skill" "skill does not lead the captain with the submitted title"
-  assert_grep 'a write OpenBrain accepted without returning all three values' "$skill" \
-    "skill does not tell the captain an incompletely reported write is unconfirmed"
+  assert_grep 'When the blocker says the memory may already exist' "$skill" \
+    "skill does not tell the captain how to read the accepted-but-unconfirmed blocker"
+  assert_grep 'Any other exit-4 blocker means the outcome is genuinely unknown' "$skill" \
+    "skill does not separate an unknown outcome from a probably-created memory"
   assert_grep 'Do not retry the helper after exit code 4' "$skill" "skill permits accidental duplicate writes"
   pass "memorize rejects unsafe inputs and declares its user-facing one-write contract"
 }
