@@ -126,7 +126,7 @@ wait_for_text "(openai-codex)" 120 || fail "Pi did not reach its ready composer"
 sleep 1
 
 : > "$HOME_DIR/state/pi-e2e.meta"
-send_prompt "Call fm_watch_arm_pi exactly once and never use bash to arm supervision. After the watcher wake arrives, run bin/fm-wake-drain.sh, do not call fm_watch_arm_pi again, and reply exactly HANDLED."
+send_prompt "Call fm_watch_arm_pi exactly once and never use bash to arm supervision. After the watcher wake arrives, run bin/fm-wake-drain.sh and reply exactly HANDLED."
 wait_for_text "watcher: started Pi extension arm child 1" || fail "Pi did not render the initial watcher tool result"
 
 printf 'done: pi live e2e watcher fire\n' > "$HOME_DIR/state/pi-e2e.status"
