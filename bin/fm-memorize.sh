@@ -32,10 +32,13 @@
 #      are printed as JSON.
 #   2  Invalid local input or usage.
 #   3  Nothing was written: Codex, the openbrain MCP server, or authentication was unavailable, or
-#      Codex attempted no OpenBrain write at all. Retrying after the blocker is fixed is safe.
-#   4  A write was attempted and its outcome is unconfirmed; do not retry automatically. The
-#      blocker distinguishes a write OpenBrain accepted without returning all three values, where
-#      the memory may already exist, from a receipt that proves nothing either way.
+#      Codex ended on its own without attempting any OpenBrain write. Retrying after the blocker is
+#      fixed is safe, because a self-terminated Codex flushed its events before exiting.
+#   4  A write may have been attempted and its outcome is unconfirmed; do not retry automatically.
+#      This covers a write OpenBrain accepted without returning all three values (the memory may
+#      already exist), a receipt that proves nothing either way, and a watchdog timeout or other
+#      forced termination after Codex began executing, where a completed write event may not have
+#      been recorded before the kill so the memory may already exist.
 #   129/130/143  The run was interrupted by SIGHUP, SIGINT, or SIGTERM. The workspace is removed
 #      and the run stops there rather than continuing without it; a write may already have been
 #      attempted, so its outcome is unconfirmed and it must not be retried automatically.
@@ -195,6 +198,7 @@ codex_status=0
       sleep 1
       waited=$((waited + 1))
     done
+    : > timed-out
     kill -TERM "$codex_pid" 2>/dev/null
     waited=0
     while [ "$waited" -lt 5 ]; do
@@ -348,6 +352,9 @@ verdict=$?
 case "$verdict" in
   0) ;;
   3)
+    if [ -e "$work_dir/timed-out" ] || [ "$codex_status" -gt 128 ]; then
+      fail "the OpenBrain memorize run was forcibly terminated after Codex began executing and recorded no completed write; a capture_thought result may not have been flushed before the kill, so the memory may already exist; do not retry automatically" 4
+    fi
     if [ "$codex_status" -ne 0 ]; then
       fail "Codex could not complete the OpenBrain memorize run and attempted no write; nothing was saved and it is safe to retry" 3
     fi

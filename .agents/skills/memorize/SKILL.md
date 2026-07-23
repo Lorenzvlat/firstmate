@@ -60,8 +60,9 @@ OpenBrain derives its `title` automatically and may return a truncated restateme
 If the helper reports that Codex, the configured `openbrain` MCP server, authentication, or the write is unavailable, report that concrete blocker and do not claim success.
 Exit code 3 means nothing was written, so the captain may ask for another attempt once the blocker is fixed.
 If the helper reports an unconfirmed or incomplete receipt, say that the outcome is uncertain and must not be retried under this invocation's one-write authorization.
-Exit code 4 comes with one of two blockers, and they mean different things to the captain.
-When the blocker says the memory may already exist, OpenBrain accepted the write but did not confirm every required value, and the blocker names exactly which of `title`, `timestamp`, and `identifier` were missing: report that the memory was probably created but could not be confirmed, repeat those field names and the title you submitted, and leave any recheck or cleanup to the captain.
+Exit code 4 blockers mean one of two things to the captain.
+When the blocker says the memory may already exist, treat the write as probably made but unconfirmed: report that the memory was probably created but could not be confirmed, repeat the title you submitted, and leave any recheck or cleanup to the captain rather than retrying.
+This covers both an accepted write whose result omitted required values, where the blocker also names exactly which of `title`, `timestamp`, and `identifier` were missing so you repeat those field names, and a run the watchdog timed out or otherwise forcibly terminated after Codex began executing, where a completed write event may not have been recorded.
 Any other exit-4 blocker means the outcome is genuinely unknown: say that plainly rather than implying the memory exists.
 Never expose raw Codex output, MCP diagnostics, credentials, secrets, or authentication values in the response.
 
