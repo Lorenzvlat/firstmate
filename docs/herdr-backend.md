@@ -53,6 +53,71 @@ Existing task operations use recorded endpoint ids and do not move a live task w
 The per-home workspace is reused while it has task tabs.
 Closing its last tab can remove the workspace, and the next spawn recreates it.
 
+## Firstmate worker identity and No Mistakes child activity
+
+Herdr 0.7.4's stock expanded agent row is `[["state_icon", "workspace", "tab"], ["agent"]]`.
+That is why several Pi workers in Firstmate's shared workspace all show the prominent label `firstmate`, a dim task tab on the right, and the generic `pi` label below.
+The protocol has no per-pane override for the built-in `workspace` token, and its schema has no nested-agent or child-agent relation.
+`agent.start` would create an independently interactive terminal, so Firstmate deliberately does not use it for No Mistakes visibility.
+
+Every new Herdr-backed Pi worker now receives a unique task-specific Herdr agent name after native Pi detection, such as `Pi · firstmate/review-a [w1:p2]`.
+The owner/task prefix is human-readable, and the response-derived pane suffix keeps the name distinct even if two homes sharing a session reuse an owner label and task id.
+Firstmate verifies `agent=pi` before calling `agent rename`, leaves that canonical identity unchanged, and never renames the shared workspace or the `fm-<id>` task tab.
+A shell, an unreadable pane, or a non-Pi agent is never renamed.
+
+To put that task-specific Pi name in the prominent first position rather than Herdr's shared workspace label, add this supported Herdr sidebar override to the operator's normal Herdr config:
+
+```toml
+[ui.sidebar.agents.rows_by_agent]
+pi = [["state_icon", "agent", "tab"], ["state_text", "$nm_summary"]]
+```
+
+Firstmate never edits or reloads the operator's Herdr config automatically.
+The override uses only Herdr's documented canonical `pi` row selector, built-in `agent` and `tab` values, and the custom metadata token `$nm_summary`.
+When no review is active, the optional custom token is elided and the second row still shows Pi's native state text.
+
+While the owning Herdr worker has an attributable active No Mistakes review or fix round, the watcher reports source-scoped `pane.report_metadata` on that worker's existing pane.
+The default sidebar's `agent` row becomes a bounded summary beginning with the task identity and including the child role, state, elapsed time, and last allowlisted structural activity.
+The recommended Pi row above keeps the same task identity prominent and adds the concise `$nm_summary` row.
+Tokens also expose `nm_role`, `nm_state`, `nm_phase`, `nm_elapsed`, and `nm_activity` for other supported custom layouts.
+Waiting for the captain, failure, timeout, and completion are distinct states.
+Completion, failure, and timeout are transient one-shot presentations, while active and waiting presentations use a renewable short TTL.
+Herdr's TTL removes abandoned metadata on its own, and the next watcher cycle explicitly clears this source and retires its private non-authoritative cache.
+
+This surface is observational only.
+It creates no pane, agent, Firstmate task, dispatch target, or fleet record, and it has no send, focus, interrupt, kill, resume, or control action.
+No Mistakes remains the sole owner of child processes, run lifecycle, and structured output.
+Only strict run ids, fixed role/state/phase/activity values, and numeric elapsed time reach Herdr.
+Prompt text, findings, paths, credentials, environment values, command lines, pids, raw errors, agent prose, and raw log lines are never copied.
+If the exact `pane.report_metadata` schema is unavailable, the feature performs no No Mistakes query or Herdr mutation and existing task behavior remains unchanged.
+Non-Herdr tasks never enter this path.
+
+### Isolated 0.7.4 evidence (2026-07-22)
+
+The guarded named-session test used Herdr 0.7.4, protocol 16, without changing the running default session.
+The exact command was:
+
+```sh
+HERDR_LAB_HELPER=/Users/lorenzlat/lorenz-agent-workspace/bin/fm-herdr-lab.sh \
+  bash tests/fm-herdr-nm-visibility-e2e.test.sh
+```
+
+The exact result was:
+
+```text
+ok - real Herdr lab: task-specific Pi names are distinct while both owners remain native Pi agents in one shared workspace
+ok - real Herdr lab: Herdr accepts the Pi sidebar layout that makes the task-specific agent name prominent
+ok - real Herdr lab: owning Pi row exposes bounded reviewer role/state/phase/elapsed/activity without a child agent
+ok - real Herdr lab: completed activity cleans up deterministically and leaves the named owner intact
+ok - real Herdr lab: source TTL removes abandoned activity without removing the task-specific owner name
+ok - real Herdr lab validation completed on Herdr 0.7.4 protocol 16
+```
+
+The accepted row layout and live AgentInfo values resolve visually as a task-specific first row such as `Pi · firstmate/review-a [w1:p2] · fm-review-a`, followed by state and No Mistakes summary text while activity exists.
+The same lab proved two such rows retained different names and pane ids inside one exact `firstmate` workspace, and that terminal cleanup restored the underlying task name rather than the generic `pi` label.
+`herdr api schema --json` exposed `pane.report_metadata` with title, display-agent, state-label, token, and TTL fields, but no nested-agent field or relationship.
+`agent rename` returned the unchanged canonical `agent: pi` plus the new task-specific `name`, and Herdr rejected a duplicate name with `agent_name_taken`.
+
 ## Optional presentation spaces
 
 Create local gitignored `config/herdr-presentation-spaces` to request a disposable one-task workspace for each new crewmate or scout.
@@ -278,6 +343,8 @@ tests/fm-backend-herdr-presentation-e2e.test.sh
 tests/fm-backend-herdr-eventwait-smoke.test.sh
 tests/fm-herdr-session-cleanup.test.sh
 tests/fm-herdr-session-cleanup-e2e.test.sh
+tests/fm-herdr-nm-visibility.test.sh
+tests/fm-herdr-nm-visibility-e2e.test.sh
 tests/fm-afk-inject-herdr-e2e.test.sh
 tests/fm-afk-pi-herdr-return-e2e.test.sh
 ```

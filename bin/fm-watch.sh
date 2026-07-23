@@ -55,6 +55,12 @@ mkdir -p "$STATE"
 # without sourcing the entire watcher graph.
 # shellcheck source=bin/fm-push-transition-lib.sh
 . "$SCRIPT_DIR/fm-push-transition-lib.sh"
+# Herdr-only, read-only projection of active No Mistakes reviewer/fixer activity
+# onto each owning worker's existing pane.
+# The library owns capability fallback, privacy filtering, TTL cleanup, and its
+# non-authoritative cache; this watcher only supplies the regular refresh tick.
+# shellcheck source=bin/fm-herdr-nm-visibility-lib.sh
+. "$SCRIPT_DIR/fm-herdr-nm-visibility-lib.sh"
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
 # shellcheck source=bin/fm-x-lib.sh
@@ -1012,6 +1018,13 @@ EOF
       triage_log "absorbed heartbeat (no captain-relevant change)"
     fi
   fi
+
+  # Refresh observational Herdr metadata only after every actionable wake path
+  # had its chance to exit, so a slow read-only status call can never delay a
+  # captain-relevant notification.
+  # This is a no-op for every non-Herdr task, non-ship task, and delivery mode
+  # other than no-mistakes, and it never emits a wake or controls a child run.
+  fm_nm_visibility_refresh_all "$STATE" || true
 
   # Terminal wait: a bounded native-event wait for push-capable homes (herdr),
   # else the blind poll sleep. See event_wait_or_sleep.

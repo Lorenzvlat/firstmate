@@ -109,6 +109,12 @@ FM_BACKEND_HERDR_SECONDMATE_MARKER=".fm-secondmate-home"
 # spawn can replace one verified agent-free husk under the session lock.
 # No send, capture, Treehouse, or general task-ownership path reads it.
 FM_BACKEND_HERDR_PRESENTATION_JOURNAL_SUFFIX=".herdr-presentation"
+# A Herdr-backed Pi worker keeps its native `agent=pi` identity and receives a
+# task-specific human-facing `name` through Herdr's agent.rename API after Pi
+# registers on the pane.
+# The bounded poll never renames a shell or a different detected harness.
+FM_BACKEND_HERDR_PI_RENAME_POLLS=${FM_BACKEND_HERDR_PI_RENAME_POLLS:-50}
+FM_BACKEND_HERDR_PI_RENAME_POLL_SLEEP=${FM_BACKEND_HERDR_PI_RENAME_POLL_SLEEP:-0.2}
 
 # fm_backend_herdr_workspace_label: the per-firstmate-HOME herdr workspace
 # label (docs/herdr-backend.md "Default task container shape"). The PRIMARY home (no
@@ -133,6 +139,68 @@ fm_backend_herdr_workspace_label() {
     fi
   fi
   printf 'firstmate'
+}
+
+# fm_backend_herdr_pi_worker_name: build the unique human-facing name for one
+# Firstmate-spawned Pi worker.
+# The owner/task prefix keeps the name meaningful in Herdr's agent sidebar, and
+# the exact response-derived pane id makes it unique even if two homes sharing a
+# Herdr session happen to reuse an owner label and task id.
+# The native Herdr identity remains `agent=pi`; this is only AgentInfo.name.
+fm_backend_herdr_pi_worker_name() { # <owner-label> <task-id> <kind> <pane-id>
+  local owner=$1 task=$2 kind=$3 pane=$4 subject
+  if [ "$owner" != firstmate ] \
+     && ! printf '%s\n' "$owner" | grep -Eq '^2ndmate-[A-Za-z0-9._-]+$'; then
+    return 1
+  fi
+  case "$task" in
+    ''|.*|*[!A-Za-z0-9._-]*) return 1 ;;
+  esac
+  case "$pane" in
+    ''|*[!A-Za-z0-9:_-]*) return 1 ;;
+  esac
+  if [ "$kind" = secondmate ]; then
+    subject=$owner
+  else
+    subject="$owner/$task"
+  fi
+  printf 'Pi · %s [%s]' "$subject" "$pane"
+}
+
+# fm_backend_herdr_name_pi_worker: wait only for a native Pi registration, then
+# set its human-facing Herdr name through agent.rename and verify the response.
+# A detected non-Pi identity returns 2 without mutation.
+# An absent/unreadable identity or rename failure returns 1 after a bounded wait.
+fm_backend_herdr_name_pi_worker() { # <target> <human-name>
+  local target=$1 human_name=$2 polls sleep_s attempt=0 out identity current renamed
+  fm_backend_herdr_parse_target "$target" || return 1
+  polls=$FM_BACKEND_HERDR_PI_RENAME_POLLS
+  sleep_s=$FM_BACKEND_HERDR_PI_RENAME_POLL_SLEEP
+  case "$polls" in ''|*[!0-9]*|0) polls=50 ;; esac
+  if ! printf '%s\n' "$sleep_s" | grep -Eq '^[0-9]+([.][0-9]+)?$'; then
+    sleep_s=0.2
+  fi
+  printf '%s\n' "$human_name" \
+    | grep -Eq '^Pi · (firstmate|2ndmate-[A-Za-z0-9._-]+)(/[A-Za-z0-9._-]+)? \[[A-Za-z0-9:_-]+\]$' \
+    || return 1
+  [ "${#human_name}" -le 192 ] || return 1
+  while [ "$attempt" -lt "$polls" ]; do
+    out=$(fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" agent get "$FM_BACKEND_HERDR_PANE" 2>/dev/null) || out=
+    identity=$(printf '%s' "$out" | jq -r '.result.agent.agent // empty' 2>/dev/null)
+    current=$(printf '%s' "$out" | jq -r '.result.agent.name // empty' 2>/dev/null)
+    if [ "$identity" = pi ]; then
+      [ "$current" = "$human_name" ] && return 0
+      renamed=$(fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" agent rename "$FM_BACKEND_HERDR_PANE" "$human_name" 2>/dev/null) || return 1
+      printf '%s' "$renamed" | jq -e --arg want "$human_name" '
+        .result.agent.agent == "pi" and .result.agent.name == $want
+      ' >/dev/null 2>&1 || return 1
+      return 0
+    fi
+    [ -z "$identity" ] || return 2
+    attempt=$((attempt + 1))
+    [ "$attempt" -ge "$polls" ] || sleep "$sleep_s"
+  done
+  return 1
 }
 
 # fm_backend_herdr_cli: run `herdr <args...>` scoped to <session>, setting
