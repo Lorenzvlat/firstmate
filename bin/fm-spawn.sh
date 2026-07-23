@@ -1282,6 +1282,22 @@ if [ "${HERDR_PROJECTED:-0}" -eq 1 ]; then
   spawn_herdr_presentation_order_lock_release
 fi
 spawn_send_key "$T" Enter
+# Herdr's default agent sidebar groups every task in this home's shared
+# workspace under the same prominent workspace label.
+# For Pi, wait for the native Pi registration and assign a unique task-specific
+# human-facing AgentInfo.name through Herdr's display-only naming API.
+# The pane id suffix keeps names unique across homes that share a Herdr session;
+# the tab/workspace topology and native `agent=pi` identity are unchanged.
+if [ "$BACKEND" = herdr ] && [ "$HARNESS" = pi ]; then
+  HERDR_PI_OWNER=$(FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_workspace_label)
+  if HERDR_PI_NAME=$(fm_backend_herdr_pi_worker_name "$HERDR_PI_OWNER" "$ID" "$KIND" "$HERDR_PANE_ID"); then
+    if ! fm_backend_herdr_name_pi_worker "$T" "$HERDR_PI_NAME"; then
+      echo "warning: Herdr could not apply the task-specific Pi worker name for $ID; the worker is running under its ordinary tab" >&2
+    fi
+  else
+    echo "warning: Herdr could not derive a safe task-specific Pi worker name for $ID; the worker is running under its ordinary tab" >&2
+  fi
+fi
 if [ "$KIND" = secondmate ]; then
   if ! fm_config_reread_discard_pending "$PROJ_ABS" "$ID" "$FM_HOME"; then
     if fm_config_reread_quarantine_pending "$PROJ_ABS" "$ID" "$FM_HOME"; then
