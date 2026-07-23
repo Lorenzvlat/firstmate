@@ -14,7 +14,9 @@
 # Herdr 0.7.4 has no nested-agent or child-agent relationship in protocol 16.
 # The supported observational fallback is pane.report_metadata on the owning
 # worker's existing pane.
-# It changes only a source-scoped title, state labels, and five allowlisted tokens.
+# It changes only a source-scoped title, a display-agent label, state labels, and
+# six allowlisted tokens: nm_role, nm_state, nm_phase, nm_elapsed, nm_activity,
+# and nm_summary.
 # It never creates a pane, reports an agent, changes agent authority, or exposes
 # an independently addressable target.
 #
@@ -37,6 +39,7 @@ FM_NM_VISIBILITY_CACHE_SUFFIX=.herdr-nm-activity
 FM_NM_VISIBILITY_ACTIVE_TTL_MS=${FM_NM_VISIBILITY_ACTIVE_TTL_MS:-45000}
 FM_NM_VISIBILITY_TERMINAL_TTL_MS=${FM_NM_VISIBILITY_TERMINAL_TTL_MS:-30000}
 FM_NM_VISIBILITY_TIMEOUT=${FM_NM_VISIBILITY_TIMEOUT:-3}
+FM_NM_VISIBILITY_REVIEW_LOG_TAIL=${FM_NM_VISIBILITY_REVIEW_LOG_TAIL:-200}
 
 _FM_NM_VISIBILITY_CAP_YES="|"
 _FM_NM_VISIBILITY_CAP_NO="|"
@@ -150,6 +153,66 @@ fm_nm_visibility_run_head_matches() { # <worktree> <run-head>
   git -C "$worktree" merge-base --is-ancestor "$local_full" "$run_full" 2>/dev/null
 }
 
+fm_nm_visibility_digits() { # <value>
+  case "$1" in ''|*[!0-9]*) return 1 ;; esac
+  return 0
+}
+
+fm_nm_visibility_ident() { # <value>  matches ^[A-Za-z0-9._-]+$
+  case "$1" in ''|*[!A-Za-z0-9._-]*) return 1 ;; esac
+  return 0
+}
+
+fm_nm_visibility_is_fix_round() { # <trimmed>
+  local rest round count
+  case "$1" in
+    'user-fix round starting after round '*' finding selected)') ;;
+    'user-fix round starting after round '*' findings selected)') ;;
+    *) return 1 ;;
+  esac
+  rest=${1#user-fix round starting after round }
+  round=${rest%% *}
+  fm_nm_visibility_digits "$round" || return 1
+  rest=${rest#* }
+  case "$rest" in '('*) ;; *) return 1 ;; esac
+  count=${rest#(}
+  count=${count%% *}
+  fm_nm_visibility_digits "$count"
+}
+
+fm_nm_visibility_is_child_started() { # <trimmed>
+  local name pid
+  case "$1" in *' started pid='*) ;; *) return 1 ;; esac
+  name=${1%% started pid=*}
+  pid=${1##* started pid=}
+  fm_nm_visibility_ident "$name" || return 1
+  fm_nm_visibility_digits "$pid" || return 1
+  [ "$1" = "$name started pid=$pid" ]
+}
+
+fm_nm_visibility_is_child_finished() { # <trimmed>
+  local name rest pid
+  case "$1" in *' exited pid='*' status=success') ;; *) return 1 ;; esac
+  name=${1%% exited pid=*}
+  rest=${1##* exited pid=}
+  pid=${rest%% *}
+  fm_nm_visibility_ident "$name" || return 1
+  fm_nm_visibility_digits "$pid" || return 1
+  [ "$1" = "$name exited pid=$pid status=success" ]
+}
+
+fm_nm_visibility_is_child_failed() { # <trimmed>
+  local name rest pid
+  case "$1" in *' exited pid='*' error='*) ;; *) return 1 ;; esac
+  name=${1%% exited pid=*}
+  rest=${1##* exited pid=}
+  pid=${rest%% *}
+  fm_nm_visibility_ident "$name" || return 1
+  fm_nm_visibility_digits "$pid" || return 1
+  case "$rest" in "$pid error="*) ;; *) return 1 ;; esac
+  return 0
+}
+
 FM_NM_VISIBILITY_LOG_ROLE=
 FM_NM_VISIBILITY_LOG_PHASE=
 FM_NM_VISIBILITY_LOG_ACTIVITY=
@@ -159,7 +222,9 @@ fm_nm_visibility_review_log_hints() { # <worktree> <run-id> <initial-role> <init
   FM_NM_VISIBILITY_LOG_PHASE=$4
   FM_NM_VISIBILITY_LOG_ACTIVITY=
   while IFS= read -r line; do
-    trimmed=$(fm_nm_visibility_trim "$line")
+    trimmed=$line
+    trimmed="${trimmed#"${trimmed%%[![:space:]]*}"}"
+    trimmed="${trimmed%"${trimmed##*[![:space:]]}"}"
     case "$trimmed" in
       'asking agent to fix identified issues...')
         FM_NM_VISIBILITY_LOG_ROLE=fixer
@@ -177,20 +242,20 @@ fm_nm_visibility_review_log_hints() { # <worktree> <run-id> <initial-role> <init
         FM_NM_VISIBILITY_LOG_ACTIVITY=fixes-committed
         ;;
       *)
-        if printf '%s\n' "$trimmed" | grep -Eq '^user-fix round starting after round [0-9]+ \([0-9]+ findings? selected\)$'; then
+        if fm_nm_visibility_is_fix_round "$trimmed"; then
           FM_NM_VISIBILITY_LOG_ROLE=fixer
           FM_NM_VISIBILITY_LOG_PHASE=fix
           FM_NM_VISIBILITY_LOG_ACTIVITY=fix-round-started
-        elif printf '%s\n' "$trimmed" | grep -Eq '^[A-Za-z0-9._-]+ started pid=[0-9]+$'; then
+        elif fm_nm_visibility_is_child_started "$trimmed"; then
           FM_NM_VISIBILITY_LOG_ACTIVITY=child-started
-        elif printf '%s\n' "$trimmed" | grep -Eq '^[A-Za-z0-9._-]+ exited pid=[0-9]+ status=success$'; then
+        elif fm_nm_visibility_is_child_finished "$trimmed"; then
           FM_NM_VISIBILITY_LOG_ACTIVITY=child-finished
-        elif printf '%s\n' "$trimmed" | grep -Eq '^[A-Za-z0-9._-]+ exited pid=[0-9]+ error='; then
+        elif fm_nm_visibility_is_child_failed "$trimmed"; then
           FM_NM_VISIBILITY_LOG_ACTIVITY=child-failed
         fi
         ;;
     esac
-  done < <(fm_nm_visibility_bounded_no_mistakes "$worktree" axi logs --step review --run "$run_id" || true)
+  done < <(fm_nm_visibility_bounded_no_mistakes "$worktree" axi logs --step review --run "$run_id" 2>/dev/null | tail -n "$FM_NM_VISIBILITY_REVIEW_LOG_TAIL" || true)
 }
 
 fm_nm_visibility_observation_reset() {
