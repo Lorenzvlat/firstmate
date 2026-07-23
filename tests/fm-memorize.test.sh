@@ -46,8 +46,9 @@ if [ "${FAKE_EXEC_MODE:-success}" = hang ]; then
   exit 0
 fi
 captured='{"content":[{"type":"text","text":"Thought captured.\nTitle: Returned title\nID: mem-123\nCaptured: 2026-03-12T10:11:12Z"}],"structured_content":null}'
+content_json=$(python3 -c 'import json;print(json.dumps(json.load(open("payload.json"))["content"]))')
 started='{"type":"item.started","item":{"id":"item-1","type":"mcp_tool_call","server":"openbrain","tool":"capture_thought","status":"in_progress"}}'
-completed="{\"type\":\"item.completed\",\"item\":{\"id\":\"item-1\",\"type\":\"mcp_tool_call\",\"server\":\"openbrain\",\"tool\":\"capture_thought\",\"arguments\":{\"content\":\"inert data\"},\"result\":$captured,\"error\":null,\"status\":\"completed\"}}"
+completed="{\"type\":\"item.completed\",\"item\":{\"id\":\"item-1\",\"type\":\"mcp_tool_call\",\"server\":\"openbrain\",\"tool\":\"capture_thought\",\"arguments\":{\"content\":$content_json},\"result\":$captured,\"error\":null,\"status\":\"completed\"}}"
 printf '%s\n' '{"type":"diagnostic","message":"sensitive model detail"}'
 case "${FAKE_EVENT_MODE:-capture}" in
   none) : ;;
@@ -57,6 +58,14 @@ case "${FAKE_EVENT_MODE:-capture}" in
   forget) printf '%s\n' "{\"type\":\"item.completed\",\"item\":{\"id\":\"item-1\",\"type\":\"mcp_tool_call\",\"server\":\"openbrain\",\"tool\":\"forget_thought\",\"result\":$captured,\"error\":null,\"status\":\"completed\"}}" ;;
   failed-status) printf '%s\n' "{\"type\":\"item.completed\",\"item\":{\"id\":\"item-1\",\"type\":\"mcp_tool_call\",\"server\":\"openbrain\",\"tool\":\"capture_thought\",\"result\":$captured,\"error\":null,\"status\":\"failed\"}}" ;;
   error) printf '%s\n' '{"type":"item.completed","item":{"id":"item-1","type":"mcp_tool_call","server":"openbrain","tool":"capture_thought","result":{"content":[{"type":"text","text":"capture failed"}],"isError":true},"error":null,"status":"completed"}}' ;;
+  altered-content)
+    printf '%s\n' "$started"
+    printf '%s\n' "{\"type\":\"item.completed\",\"item\":{\"id\":\"item-1\",\"type\":\"mcp_tool_call\",\"server\":\"openbrain\",\"tool\":\"capture_thought\",\"arguments\":{\"content\":\"inert data\"},\"result\":$captured,\"error\":null,\"status\":\"completed\"}}"
+    ;;
+  no-content)
+    printf '%s\n' "$started"
+    printf '%s\n' "{\"type\":\"item.completed\",\"item\":{\"id\":\"item-1\",\"type\":\"mcp_tool_call\",\"server\":\"openbrain\",\"tool\":\"capture_thought\",\"result\":$captured,\"error\":null,\"status\":\"completed\"}}"
+    ;;
   duplicate)
     printf '%s\n' "$completed"
     printf '%s\n' "{\"type\":\"item.completed\",\"item\":{\"id\":\"item-2\",\"type\":\"mcp_tool_call\",\"server\":\"openbrain\",\"tool\":\"capture_thought\",\"result\":$captured,\"error\":null,\"status\":\"completed\"}}"
@@ -246,6 +255,25 @@ test_uncertain_or_invalid_receipt_never_claims_success() {
   pass "memorize refuses success after invented or failed receipts, unfinished, mutating, or duplicate writes"
 }
 
+test_recorded_content_must_match_the_submitted_payload() {
+  local mode dir fakebin output code
+  for mode in altered-content no-content; do
+    dir="$TMP_ROOT/content-$mode"
+    fakebin=$(make_fixture "content-$mode")
+    set +e
+    output=$(FAKE_EVENT_MODE="$mode" run_helper "$dir" "$fakebin" 2>&1)
+    code=$?
+    set -e
+    expect_code 4 "$code" "recorded capture_thought content that did not match the payload ($mode)"
+    assert_contains "$output" 'do not retry automatically' \
+      "$mode recorded-content mismatch did not preserve one-write uncertainty"
+    assert_not_contains "$output" 'Returned title' "$mode recorded-content mismatch claimed a successful write"
+    assert_not_contains "$output" 'safe to retry' "$mode recorded-content mismatch invited an automatic retry"
+    assert_not_contains "$output" 'test-secret-value' "$mode recorded-content mismatch leaked authentication value"
+  done
+  pass "memorize refuses success when the recorded write content differs from the submitted payload"
+}
+
 test_completed_write_without_full_openbrain_detail_is_uncertain_not_retryable() {
   local spec mode expected confirmed dir fakebin output code
   for spec in 'no-identifier|identifier|timestamp' 'partial|timestamp, identifier|title' 'no-detail|title, timestamp, identifier|'; do
@@ -399,6 +427,7 @@ test_success_is_isolated_ephemeral_and_returns_validated_receipt
 test_payload_is_one_inert_content_value_not_shell_or_arguments
 test_configuration_and_authentication_fail_before_write
 test_uncertain_or_invalid_receipt_never_claims_success
+test_recorded_content_must_match_the_submitted_payload
 test_completed_write_without_full_openbrain_detail_is_uncertain_not_retryable
 test_proven_absence_of_a_write_stays_retryable
 test_watchdog_timeout_after_execution_is_unconfirmed_not_retryable

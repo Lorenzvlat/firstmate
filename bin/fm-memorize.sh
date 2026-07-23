@@ -290,6 +290,12 @@ try:
     payload = json.loads(payload_path.read_text(encoding="utf-8"))
 except (OSError, UnicodeError, ValueError):
     raise SystemExit(UNCONFIRMED)
+recorded_arguments = call.get("arguments")
+if not isinstance(recorded_arguments, dict):
+    raise SystemExit(UNCONFIRMED)
+recorded_content = recorded_arguments.get("content")
+if not isinstance(recorded_content, str) or recorded_content != payload.get("content"):
+    raise SystemExit(UNCONFIRMED)
 expected = {"success", "title", "timestamp", "identifier", "blocker"}
 if not isinstance(receipt, dict) or set(receipt) != expected:
     raise SystemExit(UNCONFIRMED)
