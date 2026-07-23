@@ -290,7 +290,7 @@ test_proven_absence_of_a_write_stays_retryable() {
   dir="$TMP_ROOT/read-only-call"
   fakebin=$(make_fixture read-only-call)
   set +e
-  output=$(FAKE_EVENT_MODE=readonly run_helper "$dir" "$fakebin" 2>&1)
+  output=$(FAKE_EVENT_MODE="readonly" run_helper "$dir" "$fakebin" 2>&1)
   code=$?
   set -e
   expect_code 3 "$code" "read-only OpenBrain tool call only"
@@ -385,6 +385,7 @@ test_local_input_safety_and_skill_contract() {
   assert_grep 'does not authorize updating or deleting' "$skill" "skill does not protect existing memories"
   assert_grep 'Do not invent facts' "$skill" "skill does not forbid invented memory facts"
   assert_grep 'never restate them from your own summary' "$skill" "skill permits reporting unconfirmed OpenBrain detail"
+  # shellcheck disable=SC2016 # literal backticks are part of the searched-for skill text
   assert_grep 'Lead the captain with `submitted_title`' "$skill" "skill does not lead the captain with the submitted title"
   assert_grep 'When the blocker says the memory may already exist' "$skill" \
     "skill does not tell the captain how to read the accepted-but-unconfirmed blocker"
