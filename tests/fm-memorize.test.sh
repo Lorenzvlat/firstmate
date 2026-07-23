@@ -305,16 +305,26 @@ test_proven_absence_of_a_write_stays_retryable() {
   expect_code 3 "$code" "Codex failure before any write"
   assert_contains "$output" 'safe to retry' "pre-write Codex failure was not reported as retryable"
   assert_not_contains "$output" 'test-secret-value' "pre-write failure leaked authentication value"
+  pass "memorize reports a self-terminated Codex with no write as retryable"
+}
 
-  dir="$TMP_ROOT/hang"
-  fakebin=$(make_fixture hang)
+test_watchdog_timeout_after_execution_is_unconfirmed_not_retryable() {
+  local dir="$TMP_ROOT/timeout" fakebin output code
+
+  dir="$TMP_ROOT/timeout"
+  fakebin=$(make_fixture timeout)
   set +e
   output=$(FAKE_EXEC_MODE=hang FM_MEMORIZE_TIMEOUT_SECONDS=1 run_helper "$dir" "$fakebin" 2>&1)
   code=$?
   set -e
-  expect_code 3 "$code" "hung Codex invocation"
-  assert_contains "$output" 'safe to retry' "timed-out run without a write was not reported as retryable"
-  pass "memorize bounds the Codex run and reports a proven absent write as retryable"
+  expect_code 4 "$code" "watchdog timeout after Codex began executing"
+  assert_contains "$output" 'the memory may already exist' \
+    "timed-out run treated a possible write as proven absent"
+  assert_contains "$output" 'do not retry automatically' \
+    "timed-out run invited an automatic retry that could duplicate the memory"
+  assert_not_contains "$output" 'safe to retry' "timed-out run was reported as a proven absent write"
+  assert_not_contains "$output" 'test-secret-value' "timed-out run leaked authentication value"
+  pass "memorize treats a watchdog timeout as an unconfirmed write that must not be retried"
 }
 
 test_unrecognized_read_tool_does_not_shadow_the_one_write() {
@@ -390,6 +400,7 @@ test_configuration_and_authentication_fail_before_write
 test_uncertain_or_invalid_receipt_never_claims_success
 test_completed_write_without_full_openbrain_detail_is_uncertain_not_retryable
 test_proven_absence_of_a_write_stays_retryable
+test_watchdog_timeout_after_execution_is_unconfirmed_not_retryable
 test_unrecognized_read_tool_does_not_shadow_the_one_write
 test_interrupting_signal_stops_the_run_and_cleans_up
 test_local_input_safety_and_skill_contract
