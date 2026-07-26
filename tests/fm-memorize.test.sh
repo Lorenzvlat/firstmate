@@ -37,6 +37,7 @@ if [ "${1:-}" = mcp ] && [ "${2:-}" = get ] && [ "${3:-}" = openbrain ]; then
   exit 0
 fi
 [ "${1:-}" = exec ] || exit 91
+printf '%s\n' "$$" > "$CAPTURE_DIR/codex-pid"
 printf '%s\n' "$PWD" > "$CAPTURE_DIR/cwd"
 printf '%s\n' "$@" > "$CAPTURE_DIR/args"
 cat > "$CAPTURE_DIR/instructions"
@@ -57,7 +58,8 @@ case "${FAKE_EVENT_MODE:-capture}" in
   update) printf '%s\n' "{\"type\":\"item.completed\",\"item\":{\"id\":\"item-1\",\"type\":\"mcp_tool_call\",\"server\":\"openbrain\",\"tool\":\"update_thought\",\"result\":$captured,\"error\":null,\"status\":\"completed\"}}" ;;
   forget) printf '%s\n' "{\"type\":\"item.completed\",\"item\":{\"id\":\"item-1\",\"type\":\"mcp_tool_call\",\"server\":\"openbrain\",\"tool\":\"forget_thought\",\"result\":$captured,\"error\":null,\"status\":\"completed\"}}" ;;
   failed-status) printf '%s\n' "{\"type\":\"item.completed\",\"item\":{\"id\":\"item-1\",\"type\":\"mcp_tool_call\",\"server\":\"openbrain\",\"tool\":\"capture_thought\",\"result\":$captured,\"error\":null,\"status\":\"failed\"}}" ;;
-  error) printf '%s\n' '{"type":"item.completed","item":{"id":"item-1","type":"mcp_tool_call","server":"openbrain","tool":"capture_thought","result":{"content":[{"type":"text","text":"capture failed"}],"isError":true},"error":null,"status":"completed"}}' ;;
+  error) printf '%s\n' '{"type":"item.completed","item":{"id":"item-1","type":"mcp_tool_call","server":"openbrain","tool":"capture_thought","result":null,"error":{"message":"capture failed"},"status":"failed"}}' ;;
+  is-error) printf '%s\n' '{"type":"item.completed","item":{"id":"item-1","type":"mcp_tool_call","server":"openbrain","tool":"capture_thought","result":{"content":[{"type":"text","text":"capture failed"}],"isError":true},"error":null,"status":"completed"}}' ;;
   altered-content)
     printf '%s\n' "$started"
     printf '%s\n' "{\"type\":\"item.completed\",\"item\":{\"id\":\"item-1\",\"type\":\"mcp_tool_call\",\"server\":\"openbrain\",\"tool\":\"capture_thought\",\"arguments\":{\"content\":\"inert data\"},\"result\":$captured,\"error\":null,\"status\":\"completed\"}}"
@@ -240,7 +242,7 @@ test_uncertain_or_invalid_receipt_never_claims_success() {
     assert_not_contains "$output" 'Returned title' "$mode result claimed a successful write"
     assert_not_contains "$output" 'may already exist' "$mode result implied the memory was probably created"
   done
-  for mode in started update forget duplicate error failed-status; do
+  for mode in started update forget duplicate error is-error failed-status; do
     dir="$TMP_ROOT/event-$mode"
     fakebin=$(make_fixture "event-$mode")
     set +e
@@ -339,7 +341,6 @@ test_proven_absence_of_a_write_stays_retryable() {
 test_watchdog_timeout_after_execution_is_unconfirmed_not_retryable() {
   local dir="$TMP_ROOT/timeout" fakebin output code
 
-  dir="$TMP_ROOT/timeout"
   fakebin=$(make_fixture timeout)
   set +e
   output=$(FAKE_EXEC_MODE=hang FM_MEMORIZE_TIMEOUT_SECONDS=1 run_helper "$dir" "$fakebin" 2>&1)
@@ -365,10 +366,11 @@ test_unrecognized_read_tool_does_not_shadow_the_one_write() {
 }
 
 test_interrupting_signal_stops_the_run_and_cleans_up() {
-  local dir="$TMP_ROOT/signal" fakebin pid code work waited=0
+  local dir="$TMP_ROOT/signal" fakebin pid code work codex_pid elapsed waited=0
   fakebin=$(make_fixture signal)
+  SECONDS=0
   PATH="$fakebin:/usr/bin:/bin" CAPTURE_DIR="$dir" OPENBRAIN_KEY='test-secret-value' \
-    FAKE_EXEC_MODE=hang FM_MEMORIZE_TIMEOUT_SECONDS=1 \
+    FAKE_EXEC_MODE=hang FM_MEMORIZE_TIMEOUT_SECONDS=120 \
     "$MEMORIZE" --title-file "$dir/title.txt" --body-file "$dir/body.txt" \
     >"$dir/out" 2>"$dir/error" &
   pid=$!
@@ -378,18 +380,30 @@ test_interrupting_signal_stops_the_run_and_cleans_up() {
   done
   [ -s "$dir/cwd" ] || fail "the memorize run never reached its Codex invocation"
   work=$(cat "$dir/cwd")
+  codex_pid=$(cat "$dir/codex-pid")
   kill -TERM "$pid" 2>/dev/null || fail "could not signal the memorize run"
   set +e
   wait "$pid"
   code=$?
   set -e
+  elapsed=$SECONDS
   expect_code 143 "$code" "SIGTERM during a memorize run"
+  [ "$elapsed" -lt 30 ] || \
+    fail "SIGTERM was not handled until the Codex invocation ended on its own (${elapsed}s)"
   [ ! -e "$work" ] || fail "interrupted run left its temporary workspace behind: $work"
+  waited=0
+  while kill -0 "$codex_pid" 2>/dev/null && [ "$waited" -lt 50 ]; do
+    sleep 0.1
+    waited=$((waited + 1))
+  done
+  if kill -0 "$codex_pid" 2>/dev/null; then
+    fail "interrupted run left its Codex client running: $codex_pid"
+  fi
   assert_contains "$(cat "$dir/error")" 'do not retry automatically' \
     "interrupted run did not warn against an automatic retry"
   assert_not_contains "$(cat "$dir/error")$(cat "$dir/out")" 'test-secret-value' \
     "interrupted run leaked authentication value"
-  pass "memorize cleans up and terminates when its run is interrupted by a signal"
+  pass "memorize promptly terminates its Codex client, cleans up, and stops when interrupted by a signal"
 }
 
 test_local_input_safety_and_skill_contract() {

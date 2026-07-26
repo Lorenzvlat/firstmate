@@ -95,10 +95,49 @@ command -v python3 >/dev/null 2>&1 || fail "python3 is unavailable" 3
 command -v codex >/dev/null 2>&1 || fail "Codex CLI is unavailable" 3
 
 work_dir=$(mktemp -d "${TMPDIR:-/tmp}/fm-memorize.XXXXXX") || fail "could not create an isolated temporary directory" 3
+run_pid=
+codex_pid_file="$work_dir/codex.pid"
+watchdog_pid_file="$work_dir/watchdog.pid"
 cleanup() {
   rm -rf "$work_dir"
 }
+child_pids() {
+  local pid_file pid
+  for pid_file in "$codex_pid_file" "$watchdog_pid_file"; do
+    pid=$(cat "$pid_file" 2>/dev/null) || continue
+    case "$pid" in
+      ''|*[!0-9]*) continue ;;
+    esac
+    printf '%s\n' "$pid"
+  done
+}
+terminate_run() {
+  local pid waited alive
+  if [ -n "$run_pid" ]; then
+    kill -TERM "$run_pid" 2>/dev/null
+  fi
+  for pid in $(child_pids); do
+    kill -TERM "$pid" 2>/dev/null
+  done
+  waited=0
+  while [ "$waited" -lt 20 ]; do
+    alive=
+    for pid in $(child_pids); do
+      if kill -0 "$pid" 2>/dev/null; then
+        alive=1
+      fi
+    done
+    [ -n "$alive" ] || return 0
+    sleep 0.1
+    waited=$((waited + 1))
+  done
+  for pid in $(child_pids); do
+    kill -KILL "$pid" 2>/dev/null
+  done
+  return 0
+}
 interrupted() {
+  terminate_run
   cleanup
   trap - EXIT
   printf 'fm-memorize: interrupted by %s; any OpenBrain write in flight is unconfirmed, so do not retry automatically\n' "$1" >&2
@@ -191,6 +230,7 @@ codex_status=0
     --output-last-message receipt.json \
     - < instructions.txt >events.jsonl 2>codex.stderr &
   codex_pid=$!
+  printf '%s\n' "$codex_pid" > codex.pid
   (
     waited=0
     while [ "$waited" -lt "$timeout_secs" ]; do
@@ -198,6 +238,7 @@ codex_status=0
       sleep 1
       waited=$((waited + 1))
     done
+    kill -0 "$codex_pid" 2>/dev/null || exit 0
     : > timed-out
     kill -TERM "$codex_pid" 2>/dev/null
     waited=0
@@ -208,9 +249,17 @@ codex_status=0
     done
     kill -KILL "$codex_pid" 2>/dev/null
   ) >/dev/null 2>&1 &
+  watchdog_pid=$!
+  printf '%s\n' "$watchdog_pid" > watchdog.pid
   wait "$codex_pid"
-  exit $?
-) || codex_status=$?
+  run_status=$?
+  kill -TERM "$watchdog_pid" 2>/dev/null
+  exit "$run_status"
+) &
+run_pid=$!
+wait "$run_pid" || codex_status=$?
+run_pid=
+rm -f "$codex_pid_file" "$watchdog_pid_file"
 
 python3 - "$work_dir/receipt.json" "$work_dir/events.jsonl" "$work_dir/payload.json" "$work_dir/missing.txt" <<'PY'
 import json
