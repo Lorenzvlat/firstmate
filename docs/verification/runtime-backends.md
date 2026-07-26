@@ -130,6 +130,38 @@ ok - real Herdr lab validation completed on Herdr 0.7.4 with the default-session
 
 The suite also covers lost or failed move responses, active-tab refusal, restart husks, missing and duplicate tokens, manual renames, concurrent cleanup, and exact focus restoration.
 
+### Pi worker identity and No Mistakes activity
+
+The guarded named-session suite ran on 2026-07-22 against Herdr 0.7.4 protocol 16:
+
+```sh
+HERDR_LAB_HELPER=bin/fm-herdr-lab.sh \
+  tests/fm-herdr-nm-visibility-e2e.test.sh
+```
+
+Observed output:
+
+```text
+ok - real Herdr lab: task-specific Pi names are distinct while both owners remain native Pi agents in one shared workspace
+ok - real Herdr lab: Herdr accepts the Pi sidebar layout that makes the task-specific agent name prominent
+ok - real Herdr lab: owning Pi row exposes bounded reviewer role/state/phase/elapsed/activity without a child agent
+ok - real Herdr lab: completed activity cleans up deterministically and leaves the named owner intact
+ok - real Herdr lab: source TTL removes abandoned activity without removing the task-specific owner name
+ok - real Herdr lab validation completed on Herdr 0.7.4 protocol 16
+```
+
+The accepted row layout and live AgentInfo values resolved visually as a task-specific first row such as `Pi · firstmate/review-a [w1:p2] · fm-review-a`, followed by state and No Mistakes summary text while activity existed.
+Two such rows retained different names and pane ids inside one exact `firstmate` workspace, and terminal cleanup restored the underlying task name rather than the generic `pi` label.
+`herdr api schema --json` exposed `pane.report_metadata` with title, display-agent, state-label, token, and TTL fields, but no nested-agent field or relationship.
+`agent rename` returned the unchanged canonical `agent: pi` plus the new task-specific `name`, and Herdr rejected a duplicate name with `agent_name_taken`.
+
+The focused privacy, attribution, capability-fallback, lifecycle, and cleanup regressions are:
+
+```sh
+tests/fm-herdr-nm-visibility.test.sh
+tests/fm-herdr-nm-visibility-e2e.test.sh
+```
+
 The mandatory projection suite ran again on 2026-07-24 against Herdr 0.7.5 protocol 16:
 
 ```sh

@@ -92,31 +92,7 @@ Prompt text, findings, paths, credentials, environment values, command lines, pi
 If the exact `pane.report_metadata` schema is unavailable, the feature performs no No Mistakes query or Herdr mutation and existing task behavior remains unchanged.
 Non-Herdr tasks never enter this path.
 
-### Isolated 0.7.4 evidence (2026-07-22)
-
-The guarded named-session test used Herdr 0.7.4, protocol 16, without changing the running default session.
-The exact command was:
-
-```sh
-HERDR_LAB_HELPER=/Users/lorenzlat/lorenz-agent-workspace/bin/fm-herdr-lab.sh \
-  bash tests/fm-herdr-nm-visibility-e2e.test.sh
-```
-
-The exact result was:
-
-```text
-ok - real Herdr lab: task-specific Pi names are distinct while both owners remain native Pi agents in one shared workspace
-ok - real Herdr lab: Herdr accepts the Pi sidebar layout that makes the task-specific agent name prominent
-ok - real Herdr lab: owning Pi row exposes bounded reviewer role/state/phase/elapsed/activity without a child agent
-ok - real Herdr lab: completed activity cleans up deterministically and leaves the named owner intact
-ok - real Herdr lab: source TTL removes abandoned activity without removing the task-specific owner name
-ok - real Herdr lab validation completed on Herdr 0.7.4 protocol 16
-```
-
-The accepted row layout and live AgentInfo values resolve visually as a task-specific first row such as `Pi · firstmate/review-a [w1:p2] · fm-review-a`, followed by state and No Mistakes summary text while activity exists.
-The same lab proved two such rows retained different names and pane ids inside one exact `firstmate` workspace, and that terminal cleanup restored the underlying task name rather than the generic `pi` label.
-`herdr api schema --json` exposed `pane.report_metadata` with title, display-agent, state-label, token, and TTL fields, but no nested-agent field or relationship.
-`agent rename` returned the unchanged canonical `agent: pi` plus the new task-specific `name`, and Herdr rejected a duplicate name with `agent_name_taken`.
+[`verification/runtime-backends.md`](verification/runtime-backends.md#pi-worker-identity-and-no-mistakes-activity) records the versioned schema, identity, layout, privacy, and cleanup evidence for this feature.
 
 ## Optional presentation spaces
 
