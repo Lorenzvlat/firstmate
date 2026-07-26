@@ -33,6 +33,12 @@ case "${1:-} ${2:-}" in
 esac
 SH
 chmod +x "$FAKEBIN/no-mistakes"
+cat > "$FAKEBIN/herdr" <<'SH'
+#!/usr/bin/env bash
+trap '' TERM
+while :; do sleep 1; done
+SH
+chmod +x "$FAKEBIN/herdr"
 PATH="$FAKEBIN:$PATH"
 export PATH FM_FAKE_NM_LOG="$NM_LOG"
 
@@ -442,7 +448,7 @@ test_refresh_cycle_is_bounded_and_fair() {
 }
 
 test_metadata_report_and_clear_use_bounded_herdr() {
-  local calls helper_source
+  local calls helper_source no_mistakes_source
   reset_case
   FM_FAKE_AXI_STATUS=$(status_with_review running 1000)
   fm_nm_visibility_refresh_task "$STATE" review-task
@@ -452,9 +458,30 @@ test_metadata_report_and_clear_use_bounded_herdr() {
   assert_contains "$calls" $'\x1f''--clear-title'$'\x1f''--clear-display-agent' "metadata clear bypassed bounded Herdr execution"
   assert_not_contains "$(sed -n '/^fm_nm_visibility_report()/,/^}/p; /^fm_nm_visibility_clear()/,/^}/p' "$ROOT/bin/fm-herdr-nm-visibility-lib.sh")" 'fm_backend_herdr_cli' "visibility mutation calls the unbounded backend helper"
   helper_source=$(sed -n '/^fm_nm_visibility_bounded_herdr()/,/^}/p' "$ROOT/bin/fm-herdr-nm-visibility-lib.sh")
-  assert_contains "$helper_source" 'timeout "$FM_NM_VISIBILITY_TIMEOUT" herdr "$@"' "bounded Herdr helper lacks timeout execution"
+  no_mistakes_source=$(sed -n '/^fm_nm_visibility_bounded_no_mistakes()/,/^}/p' "$ROOT/bin/fm-herdr-nm-visibility-lib.sh")
+  assert_contains "$helper_source" 'timeout --kill-after=1 "$FM_NM_VISIBILITY_TIMEOUT" herdr "$@"' "bounded Herdr helper lacks KILL escalation"
+  assert_contains "$helper_source" 'gtimeout --kill-after=1 "$FM_NM_VISIBILITY_TIMEOUT" herdr "$@"' "bounded Herdr helper lacks gtimeout KILL escalation"
+  assert_contains "$no_mistakes_source" 'timeout --kill-after=1 "$FM_NM_VISIBILITY_TIMEOUT" no-mistakes "$@"' "bounded No Mistakes helper lacks KILL escalation"
+  assert_contains "$no_mistakes_source" 'gtimeout --kill-after=1 "$FM_NM_VISIBILITY_TIMEOUT" no-mistakes "$@"' "bounded No Mistakes helper lacks gtimeout KILL escalation"
   assert_contains "$helper_source" 'kill "TERM", -$pid' "bounded Herdr helper lacks process-group fallback termination"
   pass "metadata reports and clears share bounded Herdr execution"
+}
+
+test_term_ignoring_herdr_is_killed() {
+  local started elapsed
+  started=$(date +%s)
+  if (
+    unset -f fm_nm_visibility_bounded_herdr
+    # shellcheck source=bin/fm-herdr-nm-visibility-lib.sh
+    . "$ROOT/bin/fm-herdr-nm-visibility-lib.sh"
+    FM_NM_VISIBILITY_TIMEOUT=1
+    fm_nm_visibility_bounded_herdr fmtest status --json
+  ); then
+    fail "TERM-ignoring Herdr command unexpectedly succeeded"
+  fi
+  elapsed=$(($(date +%s) - started))
+  [ "$elapsed" -le 4 ] || fail "TERM-ignoring Herdr command exceeded bounded KILL escalation"
+  pass "TERM-ignoring Herdr subprocess is killed within the watcher budget"
 }
 
 test_active_reviewer_is_visible_and_bounded
@@ -474,4 +501,5 @@ test_zero_elapsed_does_not_cross_run_cache
 test_invalid_log_tail_falls_back_and_preserves_hints
 test_top_level_failure_without_review_failure_is_visible
 test_metadata_report_and_clear_use_bounded_herdr
+test_term_ignoring_herdr_is_killed
 test_refresh_cycle_is_bounded_and_fair

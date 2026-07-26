@@ -114,8 +114,8 @@ fm_nm_visibility_bounded_no_mistakes() { # <worktree> <args...>
     timeout_kind=perl
   fi
   case "$timeout_kind" in
-    timeout) ( cd "$worktree" && timeout "$FM_NM_VISIBILITY_TIMEOUT" no-mistakes "$@" ) 2>/dev/null ;;
-    gtimeout) ( cd "$worktree" && gtimeout "$FM_NM_VISIBILITY_TIMEOUT" no-mistakes "$@" ) 2>/dev/null ;;
+    timeout) ( cd "$worktree" && timeout --kill-after=1 "$FM_NM_VISIBILITY_TIMEOUT" no-mistakes "$@" ) 2>/dev/null ;;
+    gtimeout) ( cd "$worktree" && gtimeout --kill-after=1 "$FM_NM_VISIBILITY_TIMEOUT" no-mistakes "$@" ) 2>/dev/null ;;
     perl)
       ( cd "$worktree" && perl -e 'my $t = shift; my $pid = fork; die "fork failed" unless defined $pid; if (!$pid) { setpgrp(0, 0); exec @ARGV } local $SIG{ALRM} = sub { kill "TERM", -$pid; select undef, undef, undef, 0.2; kill "KILL", -$pid; exit 124 }; alarm $t; waitpid $pid, 0; exit($? >> 8)' "$FM_NM_VISIBILITY_TIMEOUT" no-mistakes "$@" ) 2>/dev/null
       ;;
@@ -135,8 +135,8 @@ fm_nm_visibility_bounded_herdr() { # <session> <args...>
     timeout_kind=perl
   fi
   case "$timeout_kind" in
-    timeout) HERDR_SESSION="$session" timeout "$FM_NM_VISIBILITY_TIMEOUT" herdr "$@" --session "$session" 2>/dev/null ;;
-    gtimeout) HERDR_SESSION="$session" gtimeout "$FM_NM_VISIBILITY_TIMEOUT" herdr "$@" --session "$session" 2>/dev/null ;;
+    timeout) HERDR_SESSION="$session" timeout --kill-after=1 "$FM_NM_VISIBILITY_TIMEOUT" herdr "$@" --session "$session" 2>/dev/null ;;
+    gtimeout) HERDR_SESSION="$session" gtimeout --kill-after=1 "$FM_NM_VISIBILITY_TIMEOUT" herdr "$@" --session "$session" 2>/dev/null ;;
     perl)
       HERDR_SESSION="$session" perl -e 'my $t = shift; my $pid = fork; die "fork failed" unless defined $pid; if (!$pid) { setpgrp(0, 0); exec @ARGV } local $SIG{ALRM} = sub { kill "TERM", -$pid; select undef, undef, undef, 0.2; kill "KILL", -$pid; exit 124 }; alarm $t; waitpid $pid, 0; exit($? >> 8)' "$FM_NM_VISIBILITY_TIMEOUT" herdr "$@" --session "$session" 2>/dev/null
       ;;
