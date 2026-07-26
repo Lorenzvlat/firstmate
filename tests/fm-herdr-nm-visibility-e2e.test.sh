@@ -6,6 +6,8 @@ set -u
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 HERDR_LAB_HELPER=${HERDR_LAB_HELPER:-$ROOT/bin/fm-herdr-lab.sh}
+# shellcheck source=bin/fm-herdr-version.sh
+. "$ROOT/bin/fm-herdr-version.sh"
 
 fail() { printf 'not ok - %s\n' "$1" >&2; exit 1; }
 pass() { printf 'ok - %s\n' "$1"; }
@@ -26,7 +28,7 @@ trap cleanup EXIT HUP INT TERM
 STATUS=$("$HERDR_LAB_HELPER" run "$SESSION" status --json) || fail "could not read isolated Herdr status"
 HERDR_VERSION=$(printf '%s' "$STATUS" | jq -r '.client.version // empty')
 HERDR_PROTOCOL=$(printf '%s' "$STATUS" | jq -r '.client.protocol // empty')
-[ "$HERDR_VERSION" = 0.7.4 ] || fail "expected Herdr 0.7.4, got ${HERDR_VERSION:-empty}"
+[ "$HERDR_VERSION" = "$FM_HERDR_CI_VERSION" ] || fail "expected Herdr $FM_HERDR_CI_VERSION, got ${HERDR_VERSION:-empty}"
 [ "$HERDR_PROTOCOL" -ge 16 ] 2>/dev/null || fail "expected Herdr protocol 16 or newer, got ${HERDR_PROTOCOL:-empty}"
 
 CREATE=$("$HERDR_LAB_HELPER" run "$SESSION" workspace create --cwd "$TMP_ROOT" --label firstmate --no-focus) \

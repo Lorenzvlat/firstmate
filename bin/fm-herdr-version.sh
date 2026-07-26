@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+
+FM_HERDR_CI_VERSION=0.7.4
+FM_HERDR_CI_TAG="v${FM_HERDR_CI_VERSION}"

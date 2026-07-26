@@ -40,9 +40,15 @@ FM_NM_VISIBILITY_ACTIVE_TTL_MS=${FM_NM_VISIBILITY_ACTIVE_TTL_MS:-45000}
 FM_NM_VISIBILITY_TERMINAL_TTL_MS=${FM_NM_VISIBILITY_TERMINAL_TTL_MS:-30000}
 FM_NM_VISIBILITY_TIMEOUT=${FM_NM_VISIBILITY_TIMEOUT:-3}
 FM_NM_VISIBILITY_REVIEW_LOG_TAIL=${FM_NM_VISIBILITY_REVIEW_LOG_TAIL:-200}
+FM_NM_VISIBILITY_MAX_TASKS_PER_CYCLE=${FM_NM_VISIBILITY_MAX_TASKS_PER_CYCLE:-1}
 
 _FM_NM_VISIBILITY_CAP_YES="|"
 _FM_NM_VISIBILITY_CAP_NO="|"
+_FM_NM_VISIBILITY_REFRESH_CURSOR=
+
+FM_NM_VISIBILITY_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=bin/fm-nm-status-lib.sh
+. "$FM_NM_VISIBILITY_ROOT/bin/fm-nm-status-lib.sh"
 
 fm_nm_visibility_now() {
   if [ -n "${FM_NM_VISIBILITY_NOW:-}" ]; then
@@ -117,49 +123,41 @@ fm_nm_visibility_bounded_no_mistakes() { # <worktree> <args...>
   esac
 }
 
+fm_nm_visibility_bounded_herdr_schema() { # <session>
+  local session=$1 timeout_kind=none
+  fm_nm_visibility_positive_integer "$FM_NM_VISIBILITY_TIMEOUT" || return 1
+  if command -v timeout >/dev/null 2>&1; then
+    timeout_kind=timeout
+  elif command -v gtimeout >/dev/null 2>&1; then
+    timeout_kind=gtimeout
+  elif command -v perl >/dev/null 2>&1; then
+    timeout_kind=perl
+  fi
+  case "$timeout_kind" in
+    timeout) HERDR_SESSION="$session" timeout "$FM_NM_VISIBILITY_TIMEOUT" herdr api schema --json --session "$session" 2>/dev/null ;;
+    gtimeout) HERDR_SESSION="$session" gtimeout "$FM_NM_VISIBILITY_TIMEOUT" herdr api schema --json --session "$session" 2>/dev/null ;;
+    perl)
+      HERDR_SESSION="$session" perl -e 'my $t = shift; my $pid = fork; die "fork failed" unless defined $pid; if (!$pid) { setpgrp(0, 0); exec @ARGV } local $SIG{ALRM} = sub { kill "TERM", -$pid; select undef, undef, undef, 0.2; kill "KILL", -$pid; exit 124 }; alarm $t; waitpid $pid, 0; exit($? >> 8)' "$FM_NM_VISIBILITY_TIMEOUT" herdr api schema --json --session "$session" 2>/dev/null
+      ;;
+    *) return 1 ;;
+  esac
+}
+
 FM_NM_VISIBILITY_STATUS_OUT=
 fm_nm_visibility_status_field() { # <key>
-  printf '%s\n' "$FM_NM_VISIBILITY_STATUS_OUT" \
-    | sed -n "s/^[[:space:]]*$1:[[:space:]]*\(.*\)/\1/p" \
-    | head -1
+  FM_NM_STATUS_OUT=$FM_NM_VISIBILITY_STATUS_OUT
+  fm_nm_status_field "$1"
 }
 
 FM_NM_VISIBILITY_REVIEW_STATUS=
 FM_NM_VISIBILITY_REVIEW_ELAPSED_MS=0
 fm_nm_visibility_parse_review_row() {
-  local row rest status duration
   FM_NM_VISIBILITY_REVIEW_STATUS=
   FM_NM_VISIBILITY_REVIEW_ELAPSED_MS=0
-  row=$(printf '%s\n' "$FM_NM_VISIBILITY_STATUS_OUT" \
-    | grep -E '^[[:space:]]*review,[[:space:]]*' \
-    | head -1)
-  [ -n "$row" ] || return 0
-  row=$(fm_nm_visibility_trim "$row")
-  rest=${row#*,}
-  status=$(fm_nm_visibility_strip_quotes "${rest%%,*}")
-  duration=${row##*,}
-  duration=$(fm_nm_visibility_strip_quotes "$duration")
-  case "$status" in
-    running|fixing|awaiting_approval|fix_review|completed|failed|cancelled|timed-out|timed_out|timeout|pending|skipped)
-      FM_NM_VISIBILITY_REVIEW_STATUS=$status
-      ;;
-    *) return 0 ;;
-  esac
-  case "$duration" in
-    ''|*[!0-9]*) duration=0 ;;
-  esac
-  FM_NM_VISIBILITY_REVIEW_ELAPSED_MS=$duration
-}
-
-fm_nm_visibility_run_head_matches() { # <worktree> <run-head>
-  local worktree=$1 run_head=$2 local_full run_full
-  case "$run_head" in
-    ''|*[!0-9a-fA-F]*) return 1 ;;
-  esac
-  local_full=$(git -C "$worktree" rev-parse HEAD 2>/dev/null) || return 1
-  run_full=$(git -C "$worktree" rev-parse --verify "${run_head}^{commit}" 2>/dev/null) || return 1
-  [ "$run_full" = "$local_full" ] && return 0
-  git -C "$worktree" merge-base --is-ancestor "$local_full" "$run_full" 2>/dev/null
+  FM_NM_STATUS_OUT=$FM_NM_VISIBILITY_STATUS_OUT
+  fm_nm_status_parse_step review
+  FM_NM_VISIBILITY_REVIEW_STATUS=$FM_NM_STATUS_STEP_STATUS
+  FM_NM_VISIBILITY_REVIEW_ELAPSED_MS=$FM_NM_STATUS_STEP_DURATION_MS
 }
 
 fm_nm_visibility_digits() { # <value>
@@ -291,7 +289,7 @@ fm_nm_visibility_observe() { # <worktree>
   run_head=$(fm_nm_visibility_strip_quotes "$(fm_nm_visibility_status_field head)")
   run_id=$(fm_nm_visibility_strip_quotes "$(fm_nm_visibility_status_field id)")
   [ "$run_branch" = "$branch" ] || return 0
-  fm_nm_visibility_run_head_matches "$worktree" "$run_head" || return 0
+  fm_nm_run_head_matches "$worktree" "$run_head" || return 0
   case "$run_id" in
     ''|*[!A-Za-z0-9_-]*|????????????????????????????????????????????????????????????????*) return 0 ;;
   esac
@@ -356,7 +354,7 @@ fm_nm_visibility_observe() { # <worktree>
       activity=review-timed-out
     fi
   fi
-  if [ -z "$state" ] && [ "$outcome" = failed ] && [ "$FM_NM_VISIBILITY_REVIEW_STATUS" = failed ]; then
+  if [ -z "$state" ] && [ "$outcome" = failed ]; then
     state=failed
     phase=terminal
     activity=review-failed
@@ -504,7 +502,7 @@ fm_nm_visibility_herdr_metadata_capable() { # <session>
   case "$_FM_NM_VISIBILITY_CAP_YES" in *"$key"*) return 0 ;; esac
   case "$_FM_NM_VISIBILITY_CAP_NO" in *"$key"*) return 1 ;; esac
   command -v jq >/dev/null 2>&1 || { _FM_NM_VISIBILITY_CAP_NO="$_FM_NM_VISIBILITY_CAP_NO$session|"; return 1; }
-  schema=$(fm_backend_herdr_cli "$session" api schema --json 2>/dev/null) || {
+  schema=$(fm_nm_visibility_bounded_herdr_schema "$session") || {
     _FM_NM_VISIBILITY_CAP_NO="$_FM_NM_VISIBILITY_CAP_NO$session|"
     return 1
   }
@@ -700,13 +698,35 @@ fm_nm_visibility_refresh_task() { # <state-dir> <task-id>
 }
 
 fm_nm_visibility_refresh_all() { # <state-dir>
-  local state_dir=$1 meta task cache base
+  local state_dir=$1 meta task cache base count=0 max_tasks start_after cursor_seen
   [ -d "$state_dir" ] || return 0
+  max_tasks=$FM_NM_VISIBILITY_MAX_TASKS_PER_CYCLE
+  fm_nm_visibility_positive_integer "$max_tasks" || max_tasks=1
+  start_after=$_FM_NM_VISIBILITY_REFRESH_CURSOR
+  [ -z "$start_after" ] && cursor_seen=1 || cursor_seen=0
   for meta in "$state_dir"/*.meta; do
     [ -e "$meta" ] || continue
     task=$(basename "$meta" .meta)
+    if [ "$cursor_seen" = 0 ]; then
+      [ "$task" = "$start_after" ] && cursor_seen=1
+      continue
+    fi
     fm_nm_visibility_refresh_task "$state_dir" "$task" || true
+    _FM_NM_VISIBILITY_REFRESH_CURSOR=$task
+    count=$((count + 1))
+    [ "$count" -ge "$max_tasks" ] && break
   done
+  if [ "$count" -lt "$max_tasks" ] && [ -n "$start_after" ]; then
+    for meta in "$state_dir"/*.meta; do
+      [ -e "$meta" ] || continue
+      task=$(basename "$meta" .meta)
+      [ "$task" = "$start_after" ] && break
+      fm_nm_visibility_refresh_task "$state_dir" "$task" || true
+      _FM_NM_VISIBILITY_REFRESH_CURSOR=$task
+      count=$((count + 1))
+      [ "$count" -ge "$max_tasks" ] && break
+    done
+  fi
   for cache in "$state_dir"/*"$FM_NM_VISIBILITY_CACHE_SUFFIX"; do
     [ -e "$cache" ] || continue
     base=$(basename "$cache")

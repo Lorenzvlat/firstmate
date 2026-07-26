@@ -373,6 +373,68 @@ test_watcher_owns_the_regular_observation_tick() {
   pass "the existing watcher refreshes observation without acquiring No Mistakes lifecycle control"
 }
 
+test_zero_elapsed_does_not_cross_run_cache() {
+  reset_case
+  FM_NM_VISIBILITY_NOW=100
+  FM_FAKE_AXI_STATUS=$(status_with_review running 12000)
+  fm_nm_visibility_refresh_task "$STATE" review-task
+  FM_NM_VISIBILITY_NOW=110
+  FM_FAKE_AXI_STATUS=$(status_with_review running 0 | sed 's/01VISIBILITYRUN/01VISIBILITYRUNB/')
+  fm_nm_visibility_refresh_task "$STATE" review-task
+  assert_contains "$(cat "$STATE/review-task.herdr-nm-activity")" 'elapsed_ms=0' "new run inherited prior elapsed cache"
+  pass "zero elapsed starts fresh when the observed run changes"
+}
+
+test_invalid_log_tail_falls_back_and_preserves_hints() {
+  local bad
+  for bad in invalid -4; do
+    reset_case
+    FM_NM_VISIBILITY_REVIEW_LOG_TAIL=$bad
+    FM_FAKE_AXI_STATUS=$(status_with_review running 5000)
+    FM_FAKE_REVIEW_LOG='asking agent to fix identified issues...'
+    fm_nm_visibility_refresh_task "$STATE" review-task
+    assert_contains "$(cat "$STATE/review-task.herdr-nm-activity")" 'role=fixer' "invalid log tail lost parsed role hint"
+    assert_contains "$(cat "$STATE/review-task.herdr-nm-activity")" 'phase=fix' "invalid log tail lost parsed phase hint"
+  done
+  FM_NM_VISIBILITY_REVIEW_LOG_TAIL=200
+  pass "invalid and negative log tails use the safe default without losing hints"
+}
+
+test_top_level_failure_without_review_failure_is_visible() {
+  local review
+  for review in pending skipped absent; do
+    reset_case
+    FM_FAKE_AXI_STATUS=$(status_with_review running 1000)
+    fm_nm_visibility_refresh_task "$STATE" review-task
+    if [ "$review" = absent ]; then
+      FM_FAKE_AXI_STATUS=$(status_with_review pending 0 failed failed | grep -v 'review,pending')
+    else
+      FM_FAKE_AXI_STATUS=$(status_with_review "$review" 0 failed failed)
+    fi
+    fm_nm_visibility_refresh_task "$STATE" review-task
+    assert_contains "$(cat "$STATE/review-task.herdr-nm-activity")" 'state=failed' "top-level failure was hidden for review=$review"
+  done
+  pass "top-level failure remains visible without terminal review detail"
+}
+
+test_refresh_cycle_is_bounded_and_fair() {
+  local seen
+  reset_case
+  cp "$STATE/review-task.meta" "$STATE/review-task-b.meta"
+  cp "$STATE/review-task.meta" "$STATE/review-task-c.meta"
+  fm_nm_visibility_refresh_task() { printf '%s\n' "$2" >> "$NM_LOG"; }
+  FM_NM_VISIBILITY_MAX_TASKS_PER_CYCLE=1
+  _FM_NM_VISIBILITY_REFRESH_CURSOR=
+  : > "$NM_LOG"
+  fm_nm_visibility_refresh_all "$STATE"
+  fm_nm_visibility_refresh_all "$STATE"
+  fm_nm_visibility_refresh_all "$STATE"
+  seen=$(sort -u "$NM_LOG" | wc -l | tr -d ' ')
+  [ "$seen" = 3 ] || fail "bounded refresh did not fairly visit all tasks"
+  [ "$(wc -l < "$NM_LOG" | tr -d ' ')" = 3 ] || fail "refresh exceeded one task per cycle"
+  pass "refresh cycle bounds aggregate work and fairly defers tasks"
+}
+
 test_active_reviewer_is_visible_and_bounded
 test_active_fixer_is_distinct
 test_waiting_for_captain_is_accurate
@@ -386,3 +448,7 @@ test_pi_worker_name_refuses_non_pi_identity
 test_spawn_applies_pi_name_after_launch_only_on_herdr
 test_cleanup_removes_only_the_private_visibility_cache
 test_watcher_owns_the_regular_observation_tick
+test_zero_elapsed_does_not_cross_run_cache
+test_invalid_log_tail_falls_back_and_preserves_hints
+test_top_level_failure_without_review_failure_is_visible
+test_refresh_cycle_is_bounded_and_fair
