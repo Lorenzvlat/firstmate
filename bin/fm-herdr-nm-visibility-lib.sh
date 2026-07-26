@@ -123,8 +123,9 @@ fm_nm_visibility_bounded_no_mistakes() { # <worktree> <args...>
   esac
 }
 
-fm_nm_visibility_bounded_herdr_schema() { # <session>
+fm_nm_visibility_bounded_herdr() { # <session> <args...>
   local session=$1 timeout_kind=none
+  shift
   fm_nm_visibility_positive_integer "$FM_NM_VISIBILITY_TIMEOUT" || return 1
   if command -v timeout >/dev/null 2>&1; then
     timeout_kind=timeout
@@ -134,10 +135,10 @@ fm_nm_visibility_bounded_herdr_schema() { # <session>
     timeout_kind=perl
   fi
   case "$timeout_kind" in
-    timeout) HERDR_SESSION="$session" timeout "$FM_NM_VISIBILITY_TIMEOUT" herdr api schema --json --session "$session" 2>/dev/null ;;
-    gtimeout) HERDR_SESSION="$session" gtimeout "$FM_NM_VISIBILITY_TIMEOUT" herdr api schema --json --session "$session" 2>/dev/null ;;
+    timeout) HERDR_SESSION="$session" timeout "$FM_NM_VISIBILITY_TIMEOUT" herdr "$@" --session "$session" 2>/dev/null ;;
+    gtimeout) HERDR_SESSION="$session" gtimeout "$FM_NM_VISIBILITY_TIMEOUT" herdr "$@" --session "$session" 2>/dev/null ;;
     perl)
-      HERDR_SESSION="$session" perl -e 'my $t = shift; my $pid = fork; die "fork failed" unless defined $pid; if (!$pid) { setpgrp(0, 0); exec @ARGV } local $SIG{ALRM} = sub { kill "TERM", -$pid; select undef, undef, undef, 0.2; kill "KILL", -$pid; exit 124 }; alarm $t; waitpid $pid, 0; exit($? >> 8)' "$FM_NM_VISIBILITY_TIMEOUT" herdr api schema --json --session "$session" 2>/dev/null
+      HERDR_SESSION="$session" perl -e 'my $t = shift; my $pid = fork; die "fork failed" unless defined $pid; if (!$pid) { setpgrp(0, 0); exec @ARGV } local $SIG{ALRM} = sub { kill "TERM", -$pid; select undef, undef, undef, 0.2; kill "KILL", -$pid; exit 124 }; alarm $t; waitpid $pid, 0; exit($? >> 8)' "$FM_NM_VISIBILITY_TIMEOUT" herdr "$@" --session "$session" 2>/dev/null
       ;;
     *) return 1 ;;
   esac
@@ -502,7 +503,7 @@ fm_nm_visibility_herdr_metadata_capable() { # <session>
   case "$_FM_NM_VISIBILITY_CAP_YES" in *"$key"*) return 0 ;; esac
   case "$_FM_NM_VISIBILITY_CAP_NO" in *"$key"*) return 1 ;; esac
   command -v jq >/dev/null 2>&1 || { _FM_NM_VISIBILITY_CAP_NO="$_FM_NM_VISIBILITY_CAP_NO$session|"; return 1; }
-  schema=$(fm_nm_visibility_bounded_herdr_schema "$session") || {
+  schema=$(fm_nm_visibility_bounded_herdr "$session" api schema --json) || {
     _FM_NM_VISIBILITY_CAP_NO="$_FM_NM_VISIBILITY_CAP_NO$session|"
     return 1
   }
@@ -551,7 +552,7 @@ fm_nm_visibility_report() { # <target> <identity> <role> <state> <phase> <elapse
   working_label="worker working · $child_summary"
   blocked_label="worker waiting · $child_summary"
   unknown_label=$child_summary
-  fm_backend_herdr_cli "$session" pane report-metadata "$pane" \
+  fm_nm_visibility_bounded_herdr "$session" pane report-metadata "$pane" \
     --source "$FM_NM_VISIBILITY_SOURCE" \
     --title "$title" \
     --display-agent "$display_agent" \
@@ -573,7 +574,7 @@ fm_nm_visibility_clear() { # <target>
   fm_backend_herdr_parse_target "$target" || return 1
   session=$FM_BACKEND_HERDR_SESSION
   pane=$FM_BACKEND_HERDR_PANE
-  fm_backend_herdr_cli "$session" pane report-metadata "$pane" \
+  fm_nm_visibility_bounded_herdr "$session" pane report-metadata "$pane" \
     --source "$FM_NM_VISIBILITY_SOURCE" \
     --clear-title \
     --clear-display-agent \

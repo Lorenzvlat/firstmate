@@ -66,6 +66,12 @@ fm_backend_herdr_cli() {
   esac
 }
 
+fm_nm_visibility_bounded_herdr() {
+  local session=$1
+  shift
+  fm_backend_herdr_cli "$session" "$@"
+}
+
 fm_nm_visibility_herdr_metadata_capable() {
   [ "$FM_FAKE_METADATA_CAPABLE" = 1 ]
 }
@@ -435,6 +441,22 @@ test_refresh_cycle_is_bounded_and_fair() {
   pass "refresh cycle bounds aggregate work and fairly defers tasks"
 }
 
+test_metadata_report_and_clear_use_bounded_herdr() {
+  local calls helper_source
+  reset_case
+  FM_FAKE_AXI_STATUS=$(status_with_review running 1000)
+  fm_nm_visibility_refresh_task "$STATE" review-task
+  fm_nm_visibility_clear fmtest:w1:p2
+  calls=$(cat "$HERDR_LOG")
+  assert_contains "$calls" $'\x1f''--ttl-ms'$'\x1f''45000' "active metadata report bypassed bounded Herdr execution"
+  assert_contains "$calls" $'\x1f''--clear-title'$'\x1f''--clear-display-agent' "metadata clear bypassed bounded Herdr execution"
+  assert_not_contains "$(sed -n '/^fm_nm_visibility_report()/,/^}/p; /^fm_nm_visibility_clear()/,/^}/p' "$ROOT/bin/fm-herdr-nm-visibility-lib.sh")" 'fm_backend_herdr_cli' "visibility mutation calls the unbounded backend helper"
+  helper_source=$(sed -n '/^fm_nm_visibility_bounded_herdr()/,/^}/p' "$ROOT/bin/fm-herdr-nm-visibility-lib.sh")
+  assert_contains "$helper_source" 'timeout "$FM_NM_VISIBILITY_TIMEOUT" herdr "$@"' "bounded Herdr helper lacks timeout execution"
+  assert_contains "$helper_source" 'kill "TERM", -$pid' "bounded Herdr helper lacks process-group fallback termination"
+  pass "metadata reports and clears share bounded Herdr execution"
+}
+
 test_active_reviewer_is_visible_and_bounded
 test_active_fixer_is_distinct
 test_waiting_for_captain_is_accurate
@@ -451,4 +473,5 @@ test_watcher_owns_the_regular_observation_tick
 test_zero_elapsed_does_not_cross_run_cache
 test_invalid_log_tail_falls_back_and_preserves_hints
 test_top_level_failure_without_review_failure_is_visible
+test_metadata_report_and_clear_use_bounded_herdr
 test_refresh_cycle_is_bounded_and_fair
