@@ -175,7 +175,7 @@ test_success_is_isolated_ephemeral_and_returns_validated_receipt() {
   assert_contains "$args" '--json' "Codex invocation does not expose auditable MCP events"
   assert_contains "$args" 'read-only' "Codex invocation lacks read-only filesystem sandbox"
   instructions=$(cat "$dir/instructions")
-  assert_contains "$instructions" 'exactly `cat payload.json` once' \
+  assert_contains "$instructions" "exactly \`cat payload.json\` once" \
     "Codex is not constrained to the audited local payload read"
   assert_contains "$instructions" 'exactly one new memory' "Codex is not limited to one new-memory write"
   assert_contains "$instructions" 'capture_thought' "Codex is not pointed at the real OpenBrain write tool"
