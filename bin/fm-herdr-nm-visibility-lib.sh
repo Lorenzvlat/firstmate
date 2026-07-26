@@ -71,6 +71,15 @@ fm_nm_visibility_ttl() { # <active|terminal>
   printf '%s' "$value"
 }
 
+fm_nm_visibility_review_log_tail() {
+  local value=$FM_NM_VISIBILITY_REVIEW_LOG_TAIL
+  if fm_nm_visibility_positive_integer "$value" && [ "$value" -le 10000 ]; then
+    printf '%s' "$value"
+  else
+    printf '%s' 200
+  fi
+}
+
 fm_nm_visibility_trim() {
   local value=${1:-}
   value="${value#"${value%%[![:space:]]*}"}"
@@ -217,7 +226,8 @@ FM_NM_VISIBILITY_LOG_ROLE=
 FM_NM_VISIBILITY_LOG_PHASE=
 FM_NM_VISIBILITY_LOG_ACTIVITY=
 fm_nm_visibility_review_log_hints() { # <worktree> <run-id> <initial-role> <initial-phase>
-  local worktree=$1 run_id=$2 line trimmed
+  local worktree=$1 run_id=$2 line trimmed tail_lines
+  tail_lines=$(fm_nm_visibility_review_log_tail)
   FM_NM_VISIBILITY_LOG_ROLE=$3
   FM_NM_VISIBILITY_LOG_PHASE=$4
   FM_NM_VISIBILITY_LOG_ACTIVITY=
@@ -255,7 +265,7 @@ fm_nm_visibility_review_log_hints() { # <worktree> <run-id> <initial-role> <init
         fi
         ;;
     esac
-  done < <(fm_nm_visibility_bounded_no_mistakes "$worktree" axi logs --step review --run "$run_id" 2>/dev/null | tail -n "$FM_NM_VISIBILITY_REVIEW_LOG_TAIL" || true)
+  done < <(fm_nm_visibility_bounded_no_mistakes "$worktree" axi logs --step review --run "$run_id" 2>/dev/null | tail -n "$tail_lines" || true)
 }
 
 fm_nm_visibility_observation_reset() {
@@ -578,10 +588,10 @@ fm_nm_visibility_clear() { # <target>
     --clear-token nm_summary >/dev/null 2>&1
 }
 
-fm_nm_visibility_effective_elapsed() { # <now> <observed-ms> <cache-valid>
-  local now=$1 observed_ms=$2 cache_valid=$3 delta
+fm_nm_visibility_effective_elapsed() { # <now> <observed-ms> <cache-usable-for-this-run>
+  local now=$1 observed_ms=$2 cache_usable=$3 delta
   case "$observed_ms" in ''|*[!0-9]*) observed_ms=0 ;; esac
-  if [ "$observed_ms" -gt 0 ] || [ "$cache_valid" != 1 ]; then
+  if [ "$observed_ms" -gt 0 ] || [ "$cache_usable" != 1 ]; then
     printf '%s' "$observed_ms"
     return 0
   fi
@@ -615,7 +625,7 @@ fm_nm_visibility_retire_if_due() { # <target> <cache-path> <now>
 
 fm_nm_visibility_refresh_task() { # <state-dir> <task-id>
   local state_dir=$1 task_id=$2 meta backend mode kind harness worktree target session pane owner identity cache now cache_valid=0
-  local role state phase elapsed activity ttl until prior_role
+  local role state phase elapsed activity ttl until prior_role cache_same_run=0
   case "$task_id" in ''|.*|*[!A-Za-z0-9._-]*) return 0 ;; esac
   meta="$state_dir/$task_id.meta"
   [ -f "$meta" ] && [ ! -L "$meta" ] || return 0
@@ -659,15 +669,17 @@ fm_nm_visibility_refresh_task() { # <state-dir> <task-id>
   state=$FM_NM_VISIBILITY_OBS_STATE
   phase=$FM_NM_VISIBILITY_OBS_PHASE
   activity=$FM_NM_VISIBILITY_OBS_ACTIVITY
-  elapsed=$(fm_nm_visibility_effective_elapsed "$now" "$FM_NM_VISIBILITY_OBS_ELAPSED_MS" "$cache_valid")
+  if [ "$cache_valid" = 1 ] && [ "$FM_NM_VISIBILITY_CACHE_RUN_ID" = "$FM_NM_VISIBILITY_OBS_RUN_ID" ]; then
+    cache_same_run=1
+  fi
+  elapsed=$(fm_nm_visibility_effective_elapsed "$now" "$FM_NM_VISIBILITY_OBS_ELAPSED_MS" "$cache_same_run")
   case "$state" in
     working|waiting-for-captain)
       fm_nm_visibility_report "$target" "$identity" "$role" "$state" "$phase" "$elapsed" "$activity" active || return 0
       fm_nm_visibility_cache_write "$cache" "$FM_NM_VISIBILITY_OBS_RUN_ID" "$role" "$state" "$phase" "$elapsed" "$now" 0 || true
       ;;
     failed|timed-out|completed)
-      [ "$cache_valid" = 1 ] || return 0
-      [ "$FM_NM_VISIBILITY_CACHE_RUN_ID" = "$FM_NM_VISIBILITY_OBS_RUN_ID" ] || return 0
+      [ "$cache_same_run" = 1 ] || return 0
       case "$FM_NM_VISIBILITY_CACHE_STATE" in
         retired) return 0 ;;
         failed|timed-out|completed)
