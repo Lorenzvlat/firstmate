@@ -1,7 +1,6 @@
 ---
 name: memorize
-description: Summarize the material points of the current conversation and save exactly one new memory to the captain's configured OpenBrain through Codex MCP.
-  Use when the captain invokes /memorize, says "memorize", "memorize that", asks to save or remember this conversation in OpenBrain, or makes an equivalent request.
+description: Summarize the material points of the current conversation and save exactly one new memory to the captain's configured OpenBrain through Codex MCP. Use when the captain invokes /memorize, says "memorize", "memorize that", asks to save or remember this conversation in OpenBrain, or makes an equivalent request.
 user-invocable: true
 metadata:
   internal: true
