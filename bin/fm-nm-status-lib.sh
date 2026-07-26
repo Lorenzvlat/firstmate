@@ -41,6 +41,7 @@ fm_nm_status_parse_step() { # <step>
   duration=$(fm_nm_status_strip_quotes "$duration")
   case "$status" in
     running|fixing|awaiting_approval|fix_review|completed|failed|cancelled|timed-out|timed_out|timeout|pending|skipped)
+      # shellcheck disable=SC2034 # Parsed output consumed by sourcing callers.
       FM_NM_STATUS_STEP_STATUS=$status
       ;;
     *) return 0 ;;
@@ -48,6 +49,7 @@ fm_nm_status_parse_step() { # <step>
   case "$duration" in
     ''|*[!0-9]*) duration=0 ;;
   esac
+  # shellcheck disable=SC2034 # Parsed output consumed by sourcing callers.
   FM_NM_STATUS_STEP_DURATION_MS=$duration
 }
 

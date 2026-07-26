@@ -63,7 +63,9 @@ fm_backend_herdr_cli() {
 NAME_A=$(fm_backend_herdr_pi_worker_name firstmate review-a ship "$PANE_A") || fail "could not derive first Pi name"
 NAME_B=$(fm_backend_herdr_pi_worker_name firstmate review-b ship "$PANE_B") || fail "could not derive second Pi name"
 [ "$NAME_A" != "$NAME_B" ] || fail "distinct task panes derived the same Pi name"
+# shellcheck disable=SC2034 # Read by the dynamically sourced Herdr backend.
 FM_BACKEND_HERDR_PI_RENAME_POLLS=1
+# shellcheck disable=SC2034 # Read by the dynamically sourced Herdr backend.
 FM_BACKEND_HERDR_PI_RENAME_POLL_SLEEP=0
 fm_backend_herdr_name_pi_worker "$SESSION:$PANE_A" "$NAME_A" || fail "could not rename first native Pi owner"
 fm_backend_herdr_name_pi_worker "$SESSION:$PANE_B" "$NAME_B" || fail "could not rename second native Pi owner"

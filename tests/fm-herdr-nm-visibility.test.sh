@@ -325,7 +325,9 @@ test_pi_worker_name_is_unique_and_verified() {
   reset_case
   name=$(fm_backend_herdr_pi_worker_name firstmate review-task ship w1:p2) || fail "could not derive Pi worker name"
   [ "$name" = 'Pi · firstmate/review-task [w1:p2]' ] || fail "unexpected Pi worker name: $name"
+  # shellcheck disable=SC2034 # Read by the dynamically sourced Herdr backend.
   FM_BACKEND_HERDR_PI_RENAME_POLLS=1
+  # shellcheck disable=SC2034 # Read by the dynamically sourced Herdr backend.
   FM_BACKEND_HERDR_PI_RENAME_POLL_SLEEP=0
   fm_backend_herdr_name_pi_worker fmtest:w1:p2 "$name" || fail "Pi worker rename failed"
   calls=$(cat "$HERDR_LOG")
@@ -342,7 +344,9 @@ test_pi_worker_name_refuses_non_pi_identity() {
   name=$(fm_backend_herdr_pi_worker_name firstmate review-task ship w1:p2)
   FM_FAKE_AGENT_IDENTITY=claude
   export FM_FAKE_AGENT_IDENTITY
+  # shellcheck disable=SC2034 # Read by the dynamically sourced Herdr backend.
   FM_BACKEND_HERDR_PI_RENAME_POLLS=1
+  # shellcheck disable=SC2034 # Read by the dynamically sourced Herdr backend.
   FM_BACKEND_HERDR_PI_RENAME_POLL_SLEEP=0
   fm_backend_herdr_name_pi_worker fmtest:w1:p2 "$name" >/dev/null 2>&1
   status=$?
