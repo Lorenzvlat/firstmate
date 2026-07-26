@@ -306,16 +306,32 @@ for line in raw.splitlines():
         events_complete = False
 
 attempts = []
+unsafe_tool_event = False
+safe_item_types = {
+    "agent_message",
+    "command_execution",
+    "file_change",
+    "reasoning",
+    "todo_list",
+}
 for event in events:
     item = event.get("item")
     if not isinstance(item, dict):
         continue
-    if item.get("type") != "mcp_tool_call" or item.get("server") != "openbrain":
+    item_type = item.get("type")
+    if item_type != "mcp_tool_call":
+        if item_type not in safe_item_types:
+            unsafe_tool_event = True
+        continue
+    if item.get("server") != "openbrain":
+        unsafe_tool_event = True
         continue
     if not is_write_attempt(item.get("tool")):
         continue
     attempts.append((event.get("type"), item))
 
+if unsafe_tool_event:
+    raise SystemExit(UNCONFIRMED)
 if not attempts:
     raise SystemExit(NO_WRITE if events_complete else UNCONFIRMED)
 
@@ -356,11 +372,43 @@ if not receipt["success"] or receipt["blocker"].strip():
     raise SystemExit(UNCONFIRMED)
 
 
+FIELD_ALIASES = {
+    "title": {"title"},
+    "timestamp": {"timestamp", "captured", "captured_at", "created_at"},
+    "identifier": {"identifier", "id", "memory_id", "thought_id"},
+}
+LABEL_ALIASES = {
+    alias.replace("_", " "): field
+    for field, aliases in FIELD_ALIASES.items()
+    for alias in aliases
+}
+LABELED_VALUE = re.compile(
+    r"^[ \t]*([A-Za-z][A-Za-z _-]*?)[ \t]*:[ \t]*(.*?)[ \t]*$"
+)
+
+
+def normalized_key(value):
+    return re.sub(r"[^a-z0-9]+", "_", value.strip().lower()).strip("_")
+
+
+def add_field(found, field, value):
+    if isinstance(value, (str, int, float)) and not isinstance(value, bool):
+        text = str(value).strip()
+        if text:
+            found[field].add(text)
+
+
 def collect(node, found, depth=0):
     if depth > 12:
         return
     if isinstance(node, str):
-        found.append(node)
+        for line in node.splitlines():
+            match = LABELED_VALUE.match(line)
+            if not match:
+                continue
+            field = LABEL_ALIASES.get(match.group(1).strip().lower().replace("-", " "))
+            if field:
+                add_field(found, field, match.group(2))
         stripped = node.lstrip()
         if stripped[:1] in ("{", "["):
             try:
@@ -370,22 +418,27 @@ def collect(node, found, depth=0):
             if isinstance(nested, (dict, list)):
                 collect(nested, found, depth + 1)
     elif isinstance(node, dict):
-        for value in node.values():
+        for key, value in node.items():
+            if isinstance(key, str):
+                key_name = normalized_key(key)
+                for field, aliases in FIELD_ALIASES.items():
+                    if key_name in aliases:
+                        add_field(found, field, value)
             collect(value, found, depth + 1)
     elif isinstance(node, list):
         for value in node:
             collect(value, found, depth + 1)
 
 
-strings = []
-collect(result, strings)
+result_fields = {key: set() for key in FIELD_ALIASES}
+collect(result, result_fields)
 confirmed = {}
 missing = []
 for key in ("title", "timestamp", "identifier"):
     value = receipt[key].strip()
     if not value:
         missing.append(key)
-    elif not any(value in text for text in strings):
+    elif value not in result_fields[key]:
         raise SystemExit(UNCONFIRMED)
     confirmed[key] = value
 if missing:
