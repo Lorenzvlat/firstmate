@@ -77,6 +77,16 @@ case "${FAKE_EVENT_MODE:-capture}" in
     printf '%s\n' "$started"
     printf '%s\n' "$completed"
     ;;
+  foreign-mcp)
+    printf '%s\n' '{"type":"item.completed","item":{"id":"item-0","type":"mcp_tool_call","server":"slack","tool":"send_message","result":{"ok":true},"error":null,"status":"completed"}}'
+    printf '%s\n' "$started"
+    printf '%s\n' "$completed"
+    ;;
+  web-search)
+    printf '%s\n' '{"type":"item.completed","item":{"id":"item-0","type":"web_search","query":"memory payload"}}'
+    printf '%s\n' "$started"
+    printf '%s\n' "$completed"
+    ;;
   *)
     printf '%s\n' "$started"
     printf '%s\n' "$completed"
@@ -99,6 +109,8 @@ case "${FAKE_EXEC_MODE:-success}" in
   no-identifier) printf '%s\n' '{"success":true,"title":"Returned title","timestamp":"2026-03-12T10:11:12Z","identifier":"","blocker":""}' > "$output" ;;
   no-detail) printf '%s\n' '{"success":true,"title":"","timestamp":"","identifier":"","blocker":""}' > "$output" ;;
   ungrounded) printf '%s\n' '{"success":true,"title":"Invented title","timestamp":"1999-01-01T00:00:00Z","identifier":"mem-999","blocker":""}' > "$output" ;;
+  swapped) printf '%s\n' '{"success":true,"title":"mem-123","timestamp":"Returned title","identifier":"2026-03-12T10:11:12Z","blocker":""}' > "$output" ;;
+  generic) printf '%s\n' '{"success":true,"title":"Thought captured.","timestamp":"2026-03-12T10:11:12Z","identifier":"mem-123","blocker":""}' > "$output" ;;
   rejected) printf '%s\n' '{"success":false,"title":"","timestamp":"","identifier":"","blocker":"authentication rejected"}' > "$output" ;;
   *) printf '%s\n' '{"success":true,"title":"Returned title","timestamp":"2026-03-12T10:11:12Z","identifier":"mem-123","blocker":""}' > "$output" ;;
 esac
@@ -229,7 +241,7 @@ test_configuration_and_authentication_fail_before_write() {
 
 test_uncertain_or_invalid_receipt_never_claims_success() {
   local mode dir fakebin output code
-  for mode in fail malformed ungrounded rejected; do
+  for mode in fail malformed ungrounded swapped generic rejected; do
     dir="$TMP_ROOT/receipt-$mode"
     fakebin=$(make_fixture "receipt-$mode")
     set +e
@@ -255,6 +267,23 @@ test_uncertain_or_invalid_receipt_never_claims_success() {
     assert_not_contains "$output" 'may already exist' "$mode MCP evidence implied the memory was probably created"
   done
   pass "memorize refuses success after invented or failed receipts, unfinished, mutating, or duplicate writes"
+}
+
+test_external_tool_events_prevent_success() {
+  local mode dir fakebin output code
+  for mode in foreign-mcp web-search; do
+    dir="$TMP_ROOT/external-$mode"
+    fakebin=$(make_fixture "external-$mode")
+    set +e
+    output=$(FAKE_EVENT_MODE="$mode" run_helper "$dir" "$fakebin" 2>&1)
+    code=$?
+    set -e
+    expect_code 4 "$code" "$mode alongside capture_thought"
+    assert_contains "$output" 'do not retry automatically' "$mode did not fail closed"
+    assert_not_contains "$output" 'Returned title' "$mode produced a success receipt"
+    assert_not_contains "$output" 'safe to retry' "$mode discarded evidence of a write attempt"
+  done
+  pass "memorize rejects non-OpenBrain MCP calls and other external tool events"
 }
 
 test_recorded_content_must_match_the_submitted_payload() {
@@ -441,6 +470,7 @@ test_success_is_isolated_ephemeral_and_returns_validated_receipt
 test_payload_is_one_inert_content_value_not_shell_or_arguments
 test_configuration_and_authentication_fail_before_write
 test_uncertain_or_invalid_receipt_never_claims_success
+test_external_tool_events_prevent_success
 test_recorded_content_must_match_the_submitted_payload
 test_completed_write_without_full_openbrain_detail_is_uncertain_not_retryable
 test_proven_absence_of_a_write_stays_retryable
