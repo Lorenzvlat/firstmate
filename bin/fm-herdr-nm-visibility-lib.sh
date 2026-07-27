@@ -41,6 +41,8 @@ FM_NM_VISIBILITY_TERMINAL_TTL_MS=${FM_NM_VISIBILITY_TERMINAL_TTL_MS:-30000}
 FM_NM_VISIBILITY_TIMEOUT=${FM_NM_VISIBILITY_TIMEOUT:-3}
 FM_NM_VISIBILITY_REVIEW_LOG_TAIL=${FM_NM_VISIBILITY_REVIEW_LOG_TAIL:-200}
 FM_NM_VISIBILITY_MAX_TASKS_PER_CYCLE=${FM_NM_VISIBILITY_MAX_TASKS_PER_CYCLE:-1}
+FM_NM_VISIBILITY_POLL_SECONDS=${FM_NM_VISIBILITY_POLL_SECONDS:-${FM_POLL:-15}}
+FM_NM_VISIBILITY_ACTIVE_TTL_EFFECTIVE_MS=$FM_NM_VISIBILITY_ACTIVE_TTL_MS
 
 _FM_NM_VISIBILITY_CAP_YES="|"
 _FM_NM_VISIBILITY_CAP_NO="|"
@@ -68,7 +70,7 @@ fm_nm_visibility_positive_integer() { # <value>
 fm_nm_visibility_ttl() { # <active|terminal>
   local value
   case "$1" in
-    active) value=$FM_NM_VISIBILITY_ACTIVE_TTL_MS ;;
+    active) value=$FM_NM_VISIBILITY_ACTIVE_TTL_EFFECTIVE_MS ;;
     terminal) value=$FM_NM_VISIBILITY_TERMINAL_TTL_MS ;;
     *) return 1 ;;
   esac
@@ -502,11 +504,9 @@ fm_nm_visibility_herdr_metadata_capable() { # <session>
   key="|$session|"
   case "$_FM_NM_VISIBILITY_CAP_YES" in *"$key"*) return 0 ;; esac
   case "$_FM_NM_VISIBILITY_CAP_NO" in *"$key"*) return 1 ;; esac
-  command -v jq >/dev/null 2>&1 || { _FM_NM_VISIBILITY_CAP_NO="$_FM_NM_VISIBILITY_CAP_NO$session|"; return 1; }
-  schema=$(fm_nm_visibility_bounded_herdr "$session" api schema --json) || {
-    _FM_NM_VISIBILITY_CAP_NO="$_FM_NM_VISIBILITY_CAP_NO$session|"
-    return 1
-  }
+  command -v jq >/dev/null 2>&1 || return 1
+  schema=$(fm_nm_visibility_bounded_herdr "$session" api schema --json) || return 1
+  printf '%s' "$schema" | jq -e . >/dev/null 2>&1 || return 1
   if printf '%s' "$schema" | jq -e '
     any(.schemas.request.oneOf[]?; .properties.method.const == "pane.report_metadata")
     and (.schemas.request["$defs"].PaneReportMetadataParams.required | index("pane_id") != null)
@@ -521,6 +521,17 @@ fm_nm_visibility_herdr_metadata_capable() { # <session>
   fi
   _FM_NM_VISIBILITY_CAP_NO="$_FM_NM_VISIBILITY_CAP_NO$session|"
   return 1
+}
+
+fm_nm_visibility_task_eligible() { # <state-dir> <task-id>
+  local meta backend mode kind
+  meta="$1/$2.meta"
+  [ -f "$meta" ] && [ ! -L "$meta" ] || return 1
+  backend=$(fm_backend_of_meta "$meta")
+  [ "$backend" = herdr ] || return 1
+  mode=$(fm_meta_get "$meta" mode)
+  kind=$(fm_meta_get "$meta" kind)
+  [ "$mode" = no-mistakes ] && { [ -z "$kind" ] || [ "$kind" = ship ]; }
 }
 
 fm_nm_visibility_report() { # <target> <identity> <role> <state> <phase> <elapsed-ms> <activity> <active|terminal>
@@ -700,14 +711,31 @@ fm_nm_visibility_refresh_task() { # <state-dir> <task-id>
 
 fm_nm_visibility_refresh_all() { # <state-dir>
   local state_dir=$1 meta task cache base count=0 max_tasks start_after cursor_seen
+  local eligible_count=0 rounds poll_seconds required_ttl
+  local -a eligible_tasks=()
   [ -d "$state_dir" ] || return 0
   max_tasks=$FM_NM_VISIBILITY_MAX_TASKS_PER_CYCLE
   fm_nm_visibility_positive_integer "$max_tasks" || max_tasks=1
-  start_after=$_FM_NM_VISIBILITY_REFRESH_CURSOR
-  [ -z "$start_after" ] && cursor_seen=1 || cursor_seen=0
   for meta in "$state_dir"/*.meta; do
     [ -e "$meta" ] || continue
     task=$(basename "$meta" .meta)
+    fm_nm_visibility_task_eligible "$state_dir" "$task" || continue
+    eligible_tasks+=("$task")
+    eligible_count=$((eligible_count + 1))
+  done
+  FM_NM_VISIBILITY_ACTIVE_TTL_EFFECTIVE_MS=$FM_NM_VISIBILITY_ACTIVE_TTL_MS
+  poll_seconds=$FM_NM_VISIBILITY_POLL_SECONDS
+  fm_nm_visibility_positive_integer "$poll_seconds" || poll_seconds=15
+  if [ "$eligible_count" -gt 0 ]; then
+    rounds=$(((eligible_count + max_tasks - 1) / max_tasks))
+    required_ttl=$(((rounds + 1) * poll_seconds * 1000))
+    if [ "$required_ttl" -gt "$FM_NM_VISIBILITY_ACTIVE_TTL_EFFECTIVE_MS" ]; then
+      FM_NM_VISIBILITY_ACTIVE_TTL_EFFECTIVE_MS=$required_ttl
+    fi
+  fi
+  start_after=$_FM_NM_VISIBILITY_REFRESH_CURSOR
+  [ -z "$start_after" ] && cursor_seen=1 || cursor_seen=0
+  for task in "${eligible_tasks[@]}"; do
     if [ "$cursor_seen" = 0 ]; then
       [ "$task" = "$start_after" ] && cursor_seen=1
       continue
@@ -718,9 +746,7 @@ fm_nm_visibility_refresh_all() { # <state-dir>
     [ "$count" -ge "$max_tasks" ] && break
   done
   if [ "$count" -lt "$max_tasks" ] && [ -n "$start_after" ]; then
-    for meta in "$state_dir"/*.meta; do
-      [ -e "$meta" ] || continue
-      task=$(basename "$meta" .meta)
+    for task in "${eligible_tasks[@]}"; do
       [ "$task" = "$start_after" ] && break
       fm_nm_visibility_refresh_task "$state_dir" "$task" || true
       _FM_NM_VISIBILITY_REFRESH_CURSOR=$task

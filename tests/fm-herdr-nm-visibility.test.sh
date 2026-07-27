@@ -438,8 +438,13 @@ test_refresh_cycle_is_bounded_and_fair() {
   reset_case
   cp "$STATE/review-task.meta" "$STATE/review-task-b.meta"
   cp "$STATE/review-task.meta" "$STATE/review-task-c.meta"
+  cp "$STATE/review-task.meta" "$STATE/ineligible.meta"
+  sed -i.bak 's/backend=herdr/backend=tmux/' "$STATE/ineligible.meta"
+  rm -f "$STATE/ineligible.meta.bak"
   fm_nm_visibility_refresh_task() { printf '%s\n' "$2" >> "$NM_LOG"; }
   FM_NM_VISIBILITY_MAX_TASKS_PER_CYCLE=1
+  FM_NM_VISIBILITY_POLL_SECONDS=15
+  FM_NM_VISIBILITY_ACTIVE_TTL_MS=45000
   _FM_NM_VISIBILITY_REFRESH_CURSOR=
   : > "$NM_LOG"
   fm_nm_visibility_refresh_all "$STATE"
@@ -448,7 +453,9 @@ test_refresh_cycle_is_bounded_and_fair() {
   seen=$(sort -u "$NM_LOG" | wc -l | tr -d ' ')
   [ "$seen" = 3 ] || fail "bounded refresh did not fairly visit all tasks"
   [ "$(wc -l < "$NM_LOG" | tr -d ' ')" = 3 ] || fail "refresh exceeded one task per cycle"
-  pass "refresh cycle bounds aggregate work and fairly defers tasks"
+  assert_not_contains "$(cat "$NM_LOG")" "ineligible" "ineligible task consumed the refresh budget"
+  [ "$FM_NM_VISIBILITY_ACTIVE_TTL_EFFECTIVE_MS" = 60000 ] || fail "active TTL does not cover a complete eligible-task rotation"
+  pass "refresh cycle bounds eligible work and renews before expiry"
 }
 
 test_metadata_report_and_clear_use_bounded_herdr() {
@@ -469,6 +476,28 @@ test_metadata_report_and_clear_use_bounded_herdr() {
   assert_contains "$no_mistakes_source" 'gtimeout --kill-after=1 "$FM_NM_VISIBILITY_TIMEOUT" no-mistakes "$@"' "bounded No Mistakes helper lacks gtimeout KILL escalation"
   assert_contains "$helper_source" 'kill "TERM", -$pid' "bounded Herdr helper lacks process-group fallback termination"
   pass "metadata reports and clears share bounded Herdr execution"
+}
+
+test_capability_probe_retries_transient_failure() {
+  if (
+    unset -f fm_nm_visibility_herdr_metadata_capable
+    # shellcheck source=bin/fm-herdr-nm-visibility-lib.sh
+    . "$ROOT/bin/fm-herdr-nm-visibility-lib.sh"
+    probe_log="$TMP_ROOT/capability-probes.log"
+    : > "$probe_log"
+    fm_nm_visibility_bounded_herdr() {
+      printf 'probe\n' >> "$probe_log"
+      [ "$(wc -l < "$probe_log" | tr -d ' ')" -gt 1 ] || return 1
+      printf '%s\n' '{"schemas":{"request":{"oneOf":[{"properties":{"method":{"const":"pane.report_metadata"}}}],"$defs":{"PaneReportMetadataParams":{"required":["pane_id","source"],"properties":{"title":{"type":"string"},"state_labels":{"type":"object"},"tokens":{"type":"object"},"ttl_ms":{"maximum":86400000}}}}}}}'
+    }
+    fm_nm_visibility_herdr_metadata_capable retry-session && exit 1
+    fm_nm_visibility_herdr_metadata_capable retry-session || exit 1
+    [ "$(wc -l < "$probe_log" | tr -d ' ')" = 2 ] || exit 1
+  ); then
+    pass "capability probe retries transient failures and caches parsed support"
+  else
+    fail "capability probe cached a transient failure"
+  fi
 }
 
 test_term_ignoring_herdr_is_killed() {
@@ -505,5 +534,6 @@ test_zero_elapsed_does_not_cross_run_cache
 test_invalid_log_tail_falls_back_and_preserves_hints
 test_top_level_failure_without_review_failure_is_visible
 test_metadata_report_and_clear_use_bounded_herdr
+test_capability_probe_retries_transient_failure
 test_term_ignoring_herdr_is_killed
 test_refresh_cycle_is_bounded_and_fair
