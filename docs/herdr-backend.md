@@ -64,7 +64,8 @@ Firstmate requires every new Herdr-backed Pi worker to receive a unique task-spe
 The owner/task prefix is human-readable, and the response-derived pane suffix keeps the name distinct even if two homes sharing a session reuse an owner label and task id.
 Firstmate verifies `agent=pi` before calling `agent rename`, leaves that canonical identity unchanged, and never renames the shared workspace or the `fm-<id>` task tab.
 A shell or non-Pi agent is never renamed.
-Missing native registration, a conflicting name, a failed rename, or an unreadable verification response fails the spawn and closes only the exact failed task pane when focus-safe cleanup can be verified.
+Missing native registration, a conflicting name, a failed rename, or an unreadable verification response fails the spawn, closes only the exact failed task pane when focus-safe cleanup can be verified, and then runs the normal complete spawn rollback.
+An unconfirmed pane close or incomplete rollback retains the task metadata for deterministic teardown rather than discarding its ownership record.
 
 The task-specific Pi name must appear in the prominent first position rather than Herdr's shared workspace label.
 Add this supported Herdr sidebar override to the operator's normal Herdr config:
