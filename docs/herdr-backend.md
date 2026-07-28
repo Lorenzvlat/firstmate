@@ -28,7 +28,7 @@ Spawn stops before creating a Herdr container or acquiring a task worktree when 
 No separate first-run provisioning is required.
 
 The required CI lane uses the pinned installers in `bin/fm-install-herdr.sh` and `bin/fm-install-treehouse.sh`.
-Those script headers own release assets, checksums, download bounds, and post-install gates.
+Those installers and their sourced version contracts own release assets, checksums, download bounds, and post-install gates.
 Real harness credential tests remain opt-in rather than part of default CI.
 
 ## Watching and task containers
@@ -60,10 +60,10 @@ That is why several Pi workers in Firstmate's shared workspace all show the prom
 The protocol has no per-pane override for the built-in `workspace` token, and its schema has no nested-agent or child-agent relation.
 `agent.start` would create an independently interactive terminal, so Firstmate deliberately does not use it for No Mistakes visibility.
 
-Every new Herdr-backed Pi worker now receives a unique task-specific Herdr agent name after native Pi detection, such as `Pi · firstmate/review-a [w1:p2]`.
+Firstmate makes a bounded best-effort attempt to give every new Herdr-backed Pi worker a unique task-specific Herdr agent name after native Pi detection, such as `Pi · firstmate/review-a [w1:p2]`.
 The owner/task prefix is human-readable, and the response-derived pane suffix keeps the name distinct even if two homes sharing a session reuse an owner label and task id.
 Firstmate verifies `agent=pi` before calling `agent rename`, leaves that canonical identity unchanged, and never renames the shared workspace or the `fm-<id>` task tab.
-A shell, an unreadable pane, or a non-Pi agent is never renamed.
+A shell or non-Pi agent is never renamed, and an unreadable pane keeps its ordinary tab identity after the bounded detection window.
 
 To put that task-specific Pi name in the prominent first position rather than Herdr's shared workspace label, add this supported Herdr sidebar override to the operator's normal Herdr config:
 
@@ -81,8 +81,8 @@ The default sidebar's `agent` row becomes a bounded summary beginning with the t
 The recommended Pi row above keeps the same task identity prominent and adds the concise `$nm_summary` row.
 Tokens also expose `nm_role`, `nm_state`, `nm_phase`, `nm_elapsed`, and `nm_activity` for other supported custom layouts.
 Waiting for the captain, failure, timeout, and completion are distinct states.
-Completion, failure, and timeout are transient one-shot presentations, while active and waiting presentations use a renewable short TTL.
-Herdr's TTL removes abandoned metadata on its own, and the next watcher cycle explicitly clears this source and retires its private non-authoritative cache.
+Completion, failure, and timeout are transient one-shot presentations, while active and waiting presentations use a renewable bounded TTL sized to cover the eligible-task refresh rotation.
+Herdr's TTL removes abandoned metadata on its own, and a later bounded refresh explicitly clears expired source metadata and retires its private non-authoritative cache.
 
 This surface is observational only.
 It creates no pane, agent, Firstmate task, dispatch target, or fleet record, and it has no send, focus, interrupt, kill, resume, or control action.
