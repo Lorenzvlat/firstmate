@@ -534,6 +534,7 @@ test_transient_capability_failure_preserves_terminal_continuity() {
 }
 
 test_fleet_growth_prioritizes_actual_expiry() {
+  # shellcheck disable=SC2030,SC2100 # Intentional subshell-local test configuration and task ID.
   if (
     reset_case
     rm -f "$STATE"/review-task-*.meta "$STATE/ineligible.meta"
