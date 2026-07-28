@@ -47,6 +47,7 @@ FM_NM_VISIBILITY_ACTIVE_TTL_EFFECTIVE_MS=$FM_NM_VISIBILITY_ACTIVE_TTL_MS
 _FM_NM_VISIBILITY_CAP_YES="|"
 _FM_NM_VISIBILITY_CAP_NO="|"
 _FM_NM_VISIBILITY_REFRESH_CURSOR=
+FM_NM_VISIBILITY_CAPABILITY_RESULT=transient
 
 FM_NM_VISIBILITY_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=bin/fm-nm-status-lib.sh
@@ -403,6 +404,7 @@ fm_nm_visibility_cache_reset() {
   FM_NM_VISIBILITY_CACHE_ELAPSED_MS=0
   FM_NM_VISIBILITY_CACHE_OBSERVED_EPOCH=0
   FM_NM_VISIBILITY_CACHE_TERMINAL_UNTIL=0
+  FM_NM_VISIBILITY_CACHE_PUBLISHED_UNTIL=0
 }
 
 fm_nm_visibility_cache_load() { # <path>
@@ -410,7 +412,7 @@ fm_nm_visibility_cache_load() { # <path>
   fm_nm_visibility_cache_reset
   [ -f "$path" ] && [ ! -L "$path" ] || return 1
   lines=$(wc -l < "$path" 2>/dev/null | tr -d '[:space:]')
-  [ "$lines" = 8 ] || return 1
+  [ "$lines" = 8 ] || [ "$lines" = 9 ] || return 1
   while IFS='=' read -r key value || [ -n "$key$value" ]; do
     case "$seen" in *"|$key|"*) return 1 ;; esac
     seen="$seen$key|"
@@ -423,10 +425,12 @@ fm_nm_visibility_cache_load() { # <path>
       elapsed_ms) FM_NM_VISIBILITY_CACHE_ELAPSED_MS=$value ;;
       observed_epoch) FM_NM_VISIBILITY_CACHE_OBSERVED_EPOCH=$value ;;
       terminal_until) FM_NM_VISIBILITY_CACHE_TERMINAL_UNTIL=$value ;;
+      published_until) FM_NM_VISIBILITY_CACHE_PUBLISHED_UNTIL=$value ;;
       *) return 1 ;;
     esac
   done < "$path"
-  [ "${version:-}" = 1 ] || return 1
+  case "${version:-}" in 1|2) ;; *) return 1 ;; esac
+  { [ "$version" = 1 ] && [ "$lines" = 8 ]; } || { [ "$version" = 2 ] && [ "$lines" = 9 ]; } || return 1
   case "$FM_NM_VISIBILITY_CACHE_RUN_ID" in ''|*[!A-Za-z0-9_-]*) return 1 ;; esac
   case "$FM_NM_VISIBILITY_CACHE_ROLE" in reviewer|fixer) ;; *) return 1 ;; esac
   case "$FM_NM_VISIBILITY_CACHE_STATE" in working|waiting-for-captain|failed|timed-out|completed|retired) ;; *) return 1 ;; esac
@@ -434,22 +438,31 @@ fm_nm_visibility_cache_load() { # <path>
   case "$FM_NM_VISIBILITY_CACHE_ELAPSED_MS" in ''|*[!0-9]*) return 1 ;; esac
   case "$FM_NM_VISIBILITY_CACHE_OBSERVED_EPOCH" in ''|*[!0-9]*) return 1 ;; esac
   case "$FM_NM_VISIBILITY_CACHE_TERMINAL_UNTIL" in ''|*[!0-9]*) return 1 ;; esac
+  case "$FM_NM_VISIBILITY_CACHE_PUBLISHED_UNTIL" in ''|*[!0-9]*) return 1 ;; esac
+  if [ "$version" = 1 ]; then
+    case "$FM_NM_VISIBILITY_CACHE_STATE" in
+      working|waiting-for-captain)
+        FM_NM_VISIBILITY_CACHE_PUBLISHED_UNTIL=$((FM_NM_VISIBILITY_CACHE_OBSERVED_EPOCH + (FM_NM_VISIBILITY_ACTIVE_TTL_MS + 999) / 1000))
+        ;;
+      *) FM_NM_VISIBILITY_CACHE_PUBLISHED_UNTIL=$FM_NM_VISIBILITY_CACHE_TERMINAL_UNTIL ;;
+    esac
+  fi
   FM_NM_VISIBILITY_CACHE_VALID=1
   return 0
 }
 
-fm_nm_visibility_cache_write() { # <path> <run> <role> <state> <phase> <elapsed-ms> <observed-epoch> <terminal-until>
-  local path=$1 run_id=$2 role=$3 state=$4 phase=$5 elapsed=$6 observed=$7 until=$8 tmp
+fm_nm_visibility_cache_write() { # <path> <run> <role> <state> <phase> <elapsed-ms> <observed-epoch> <terminal-until> [published-until]
+  local path=$1 run_id=$2 role=$3 state=$4 phase=$5 elapsed=$6 observed=$7 until=$8 published=${9:-0} tmp
   case "$run_id" in ''|*[!A-Za-z0-9_-]*) return 1 ;; esac
   case "$role" in reviewer|fixer) ;; *) return 1 ;; esac
   case "$state" in working|waiting-for-captain|failed|timed-out|completed|retired) ;; *) return 1 ;; esac
   case "$phase" in review|fix|decision|terminal) ;; *) return 1 ;; esac
-  case "$elapsed:$observed:$until" in *[!0-9:]*|::*|:*:|*::*) return 1 ;; esac
+  case "$elapsed:$observed:$until:$published" in *[!0-9:]*|::*|:*:|*::*) return 1 ;; esac
   mkdir -p "$(dirname "$path")" || return 1
   tmp=$(mktemp "${path}.XXXXXX") || return 1
   chmod 0600 "$tmp" || { rm -f "$tmp"; return 1; }
   {
-    printf 'version=1\n'
+    printf 'version=2\n'
     printf 'run_id=%s\n' "$run_id"
     printf 'role=%s\n' "$role"
     printf 'state=%s\n' "$state"
@@ -457,6 +470,7 @@ fm_nm_visibility_cache_write() { # <path> <run> <role> <state> <phase> <elapsed-
     printf 'elapsed_ms=%s\n' "$elapsed"
     printf 'observed_epoch=%s\n' "$observed"
     printf 'terminal_until=%s\n' "$until"
+    printf 'published_until=%s\n' "$published"
   } > "$tmp" || { rm -f "$tmp"; return 1; }
   mv -f "$tmp" "$path"
 }
@@ -501,9 +515,10 @@ fm_nm_visibility_activity_label() { # <activity-enum>
 
 fm_nm_visibility_herdr_metadata_capable() { # <session>
   local session=$1 key schema
+  FM_NM_VISIBILITY_CAPABILITY_RESULT=transient
   key="|$session|"
-  case "$_FM_NM_VISIBILITY_CAP_YES" in *"$key"*) return 0 ;; esac
-  case "$_FM_NM_VISIBILITY_CAP_NO" in *"$key"*) return 1 ;; esac
+  case "$_FM_NM_VISIBILITY_CAP_YES" in *"$key"*) FM_NM_VISIBILITY_CAPABILITY_RESULT=supported; return 0 ;; esac
+  case "$_FM_NM_VISIBILITY_CAP_NO" in *"$key"*) FM_NM_VISIBILITY_CAPABILITY_RESULT=unsupported; return 1 ;; esac
   command -v jq >/dev/null 2>&1 || return 1
   schema=$(fm_nm_visibility_bounded_herdr "$session" api schema --json) || return 1
   printf '%s' "$schema" | jq -e . >/dev/null 2>&1 || return 1
@@ -517,9 +532,11 @@ fm_nm_visibility_herdr_metadata_capable() { # <session>
     and (.schemas.request["$defs"].PaneReportMetadataParams.properties.ttl_ms.maximum >= 86400000)
   ' >/dev/null 2>&1; then
     _FM_NM_VISIBILITY_CAP_YES="$_FM_NM_VISIBILITY_CAP_YES$session|"
+    FM_NM_VISIBILITY_CAPABILITY_RESULT=supported
     return 0
   fi
   _FM_NM_VISIBILITY_CAP_NO="$_FM_NM_VISIBILITY_CAP_NO$session|"
+  FM_NM_VISIBILITY_CAPABILITY_RESULT=unsupported
   return 1
 }
 
@@ -611,7 +628,7 @@ fm_nm_visibility_effective_elapsed() { # <now> <observed-ms> <cache-usable-for-t
 }
 
 fm_nm_visibility_retire_if_due() { # <target> <cache-path> <now>
-  local target=$1 cache=$2 now=$3 active_ttl active_deadline
+  local target=$1 cache=$2 now=$3 active_deadline
   [ "$FM_NM_VISIBILITY_CACHE_VALID" = 1 ] || return 0
   case "$FM_NM_VISIBILITY_CACHE_STATE" in
     failed|timed-out|completed)
@@ -623,8 +640,7 @@ fm_nm_visibility_retire_if_due() { # <target> <cache-path> <now>
       fi
       ;;
     working|waiting-for-captain)
-      active_ttl=$(fm_nm_visibility_ttl active) || return 1
-      active_deadline=$((FM_NM_VISIBILITY_CACHE_OBSERVED_EPOCH + (active_ttl + 999) / 1000))
+      active_deadline=$FM_NM_VISIBILITY_CACHE_PUBLISHED_UNTIL
       if [ "$now" -ge "$active_deadline" ]; then
         fm_nm_visibility_clear "$target" || true
         rm -f "$cache"
@@ -659,8 +675,9 @@ fm_nm_visibility_refresh_task() { # <state-dir> <task-id>
   fi
   cache=$(fm_nm_visibility_cache_path "$state_dir" "$task_id")
   if fm_nm_visibility_cache_load "$cache"; then cache_valid=1; else rm -f "$cache"; fi
+  FM_NM_VISIBILITY_CAPABILITY_RESULT=transient
   if ! fm_nm_visibility_herdr_metadata_capable "$session"; then
-    rm -f "$cache"
+    [ "$FM_NM_VISIBILITY_CAPABILITY_RESULT" = unsupported ] && rm -f "$cache"
     return 0
   fi
   now=$(fm_nm_visibility_now)
@@ -685,8 +702,10 @@ fm_nm_visibility_refresh_task() { # <state-dir> <task-id>
   elapsed=$(fm_nm_visibility_effective_elapsed "$now" "$FM_NM_VISIBILITY_OBS_ELAPSED_MS" "$cache_same_run")
   case "$state" in
     working|waiting-for-captain)
+      ttl=$(fm_nm_visibility_ttl active) || return 0
+      until=$((now + (ttl + 999) / 1000))
       fm_nm_visibility_report "$target" "$identity" "$role" "$state" "$phase" "$elapsed" "$activity" active || return 0
-      fm_nm_visibility_cache_write "$cache" "$FM_NM_VISIBILITY_OBS_RUN_ID" "$role" "$state" "$phase" "$elapsed" "$now" 0 || true
+      fm_nm_visibility_cache_write "$cache" "$FM_NM_VISIBILITY_OBS_RUN_ID" "$role" "$state" "$phase" "$elapsed" "$now" 0 "$until" || true
       ;;
     failed|timed-out|completed)
       [ "$cache_same_run" = 1 ] || return 0
@@ -704,15 +723,15 @@ fm_nm_visibility_refresh_task() { # <state-dir> <task-id>
       ttl=$(fm_nm_visibility_ttl terminal) || return 0
       until=$((now + (ttl + 999) / 1000))
       fm_nm_visibility_report "$target" "$identity" "$role" "$state" terminal "$elapsed" "$activity" terminal || return 0
-      fm_nm_visibility_cache_write "$cache" "$FM_NM_VISIBILITY_OBS_RUN_ID" "$role" "$state" terminal "$elapsed" "$now" "$until" || true
+      fm_nm_visibility_cache_write "$cache" "$FM_NM_VISIBILITY_OBS_RUN_ID" "$role" "$state" terminal "$elapsed" "$now" "$until" "$until" || true
       ;;
   esac
 }
 
 fm_nm_visibility_refresh_all() { # <state-dir>
   local state_dir=$1 meta task cache base count=0 max_tasks start_after cursor_seen
-  local eligible_count=0 rounds poll_seconds required_ttl
-  local -a eligible_tasks=()
+  local eligible_count=0 rounds poll_seconds timeout_seconds cycle_seconds required_ttl now deadline urgent_seen="|"
+  local -a eligible_tasks=("") urgent_tasks=("")
   [ -d "$state_dir" ] || return 0
   max_tasks=$FM_NM_VISIBILITY_MAX_TASKS_PER_CYCLE
   fm_nm_visibility_positive_integer "$max_tasks" || max_tasks=1
@@ -726,28 +745,62 @@ fm_nm_visibility_refresh_all() { # <state-dir>
   FM_NM_VISIBILITY_ACTIVE_TTL_EFFECTIVE_MS=$FM_NM_VISIBILITY_ACTIVE_TTL_MS
   poll_seconds=$FM_NM_VISIBILITY_POLL_SECONDS
   fm_nm_visibility_positive_integer "$poll_seconds" || poll_seconds=15
+  timeout_seconds=$FM_NM_VISIBILITY_TIMEOUT
+  fm_nm_visibility_positive_integer "$timeout_seconds" || timeout_seconds=3
   if [ "$eligible_count" -gt 0 ]; then
     rounds=$(((eligible_count + max_tasks - 1) / max_tasks))
-    required_ttl=$(((rounds + 1) * poll_seconds * 1000))
+    cycle_seconds=$((poll_seconds + max_tasks * 4 * (timeout_seconds + 1)))
+    required_ttl=$(((rounds + 1) * cycle_seconds * 1000))
     if [ "$required_ttl" -gt "$FM_NM_VISIBILITY_ACTIVE_TTL_EFFECTIVE_MS" ]; then
       FM_NM_VISIBILITY_ACTIVE_TTL_EFFECTIVE_MS=$required_ttl
     fi
+    now=$(fm_nm_visibility_now)
+    case "$now" in ''|*[!0-9]*) now=0 ;; esac
+    while IFS=' ' read -r deadline task; do
+      [ -n "$task" ] || continue
+      urgent_tasks+=("$task")
+    done < <(
+      for task in "${eligible_tasks[@]}"; do
+        [ -n "$task" ] || continue
+        cache=$(fm_nm_visibility_cache_path "$state_dir" "$task")
+        fm_nm_visibility_cache_load "$cache" || continue
+        [ "$FM_NM_VISIBILITY_CACHE_STATE" = working ] || \
+          [ "$FM_NM_VISIBILITY_CACHE_STATE" = waiting-for-captain ] || continue
+        deadline=$FM_NM_VISIBILITY_CACHE_PUBLISHED_UNTIL
+        [ "$deadline" -le $((now + rounds * cycle_seconds)) ] || continue
+        printf '%s %s\n' "$deadline" "$task"
+      done | sort -n
+    )
   fi
-  start_after=$_FM_NM_VISIBILITY_REFRESH_CURSOR
-  [ -z "$start_after" ] && cursor_seen=1 || cursor_seen=0
-  for task in "${eligible_tasks[@]}"; do
-    if [ "$cursor_seen" = 0 ]; then
-      [ "$task" = "$start_after" ] && cursor_seen=1
-      continue
-    fi
+  for task in "${urgent_tasks[@]}"; do
+    [ -n "$task" ] || continue
     fm_nm_visibility_refresh_task "$state_dir" "$task" || true
+    urgent_seen="$urgent_seen$task|"
     _FM_NM_VISIBILITY_REFRESH_CURSOR=$task
     count=$((count + 1))
     [ "$count" -ge "$max_tasks" ] && break
   done
+  start_after=$_FM_NM_VISIBILITY_REFRESH_CURSOR
+  [ -z "$start_after" ] && cursor_seen=1 || cursor_seen=0
+  if [ "$count" -lt "$max_tasks" ]; then
+    for task in "${eligible_tasks[@]}"; do
+      [ -n "$task" ] || continue
+      if [ "$cursor_seen" = 0 ]; then
+        [ "$task" = "$start_after" ] && cursor_seen=1
+        continue
+      fi
+      case "$urgent_seen" in *"|$task|"*) continue ;; esac
+      fm_nm_visibility_refresh_task "$state_dir" "$task" || true
+      _FM_NM_VISIBILITY_REFRESH_CURSOR=$task
+      count=$((count + 1))
+      [ "$count" -ge "$max_tasks" ] && break
+    done
+  fi
   if [ "$count" -lt "$max_tasks" ] && [ -n "$start_after" ]; then
     for task in "${eligible_tasks[@]}"; do
+      [ -n "$task" ] || continue
       [ "$task" = "$start_after" ] && break
+      case "$urgent_seen" in *"|$task|"*) continue ;; esac
       fm_nm_visibility_refresh_task "$state_dir" "$task" || true
       _FM_NM_VISIBILITY_REFRESH_CURSOR=$task
       count=$((count + 1))

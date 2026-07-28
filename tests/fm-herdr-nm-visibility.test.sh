@@ -79,7 +79,12 @@ fm_nm_visibility_bounded_herdr() {
 }
 
 fm_nm_visibility_herdr_metadata_capable() {
-  [ "$FM_FAKE_METADATA_CAPABLE" = 1 ]
+  if [ "$FM_FAKE_METADATA_CAPABLE" = 1 ]; then
+    FM_NM_VISIBILITY_CAPABILITY_RESULT=supported
+    return 0
+  fi
+  FM_NM_VISIBILITY_CAPABILITY_RESULT=unsupported
+  return 1
 }
 
 write_meta() { # [backend] [harness]
@@ -138,6 +143,7 @@ reset_case() {
   : > "$HERDR_LOG"
   : > "$NM_LOG"
   rm -f "$STATE/review-task.herdr-nm-activity"
+  rm -f "$STATE"/review-task-*.meta "$STATE/ineligible.meta"
   write_meta
   FM_FAKE_METADATA_CAPABLE=1
   FM_FAKE_AGENT_IDENTITY=pi
@@ -145,6 +151,7 @@ reset_case() {
   FM_FAKE_REVIEW_LOG=
   FM_NM_VISIBILITY_NOW=1000
   FM_NM_VISIBILITY_ACTIVE_TTL_MS=45000
+  FM_NM_VISIBILITY_ACTIVE_TTL_EFFECTIVE_MS=45000
   FM_NM_VISIBILITY_TERMINAL_TTL_MS=30000
   export FM_FAKE_METADATA_CAPABLE FM_FAKE_AGENT_IDENTITY FM_FAKE_AXI_STATUS FM_FAKE_REVIEW_LOG
   export FM_NM_VISIBILITY_NOW FM_NM_VISIBILITY_ACTIVE_TTL_MS FM_NM_VISIBILITY_TERMINAL_TTL_MS
@@ -454,7 +461,7 @@ test_refresh_cycle_is_bounded_and_fair() {
   [ "$seen" = 3 ] || fail "bounded refresh did not fairly visit all tasks"
   [ "$(wc -l < "$NM_LOG" | tr -d ' ')" = 3 ] || fail "refresh exceeded one task per cycle"
   assert_not_contains "$(cat "$NM_LOG")" "ineligible" "ineligible task consumed the refresh budget"
-  [ "$FM_NM_VISIBILITY_ACTIVE_TTL_EFFECTIVE_MS" = 60000 ] || fail "active TTL does not cover a complete eligible-task rotation"
+  [ "$FM_NM_VISIBILITY_ACTIVE_TTL_EFFECTIVE_MS" = 124000 ] || fail "active TTL does not cover the worst-case bounded eligible-task rotation"
   pass "refresh cycle bounds eligible work and renews before expiry"
 }
 
@@ -500,6 +507,57 @@ test_capability_probe_retries_transient_failure() {
   fi
 }
 
+test_transient_capability_failure_preserves_terminal_continuity() {
+  if (
+    reset_case
+    FM_FAKE_AXI_STATUS=$(status_with_review running 1000)
+    fm_nm_visibility_refresh_task "$STATE" review-task
+    [ -e "$STATE/review-task.herdr-nm-activity" ] || exit 1
+    fm_nm_visibility_herdr_metadata_capable() {
+      FM_NM_VISIBILITY_CAPABILITY_RESULT=transient
+      return 1
+    }
+    FM_FAKE_AXI_STATUS=$(status_with_review completed 2000 completed passed)
+    fm_nm_visibility_refresh_task "$STATE" review-task
+    [ -e "$STATE/review-task.herdr-nm-activity" ] || exit 1
+    fm_nm_visibility_herdr_metadata_capable() {
+      FM_NM_VISIBILITY_CAPABILITY_RESULT=supported
+      return 0
+    }
+    fm_nm_visibility_refresh_task "$STATE" review-task
+    grep -q '^state=completed$' "$STATE/review-task.herdr-nm-activity"
+  ); then
+    pass "transient capability failure preserves same-run terminal continuity"
+  else
+    fail "transient capability failure discarded terminal continuity"
+  fi
+}
+
+test_fleet_growth_prioritizes_actual_expiry() {
+  if (
+    reset_case
+    rm -f "$STATE"/review-task-*.meta "$STATE/ineligible.meta"
+    cp "$STATE/review-task.meta" "$STATE/review-task-b.meta"
+    cp "$STATE/review-task.meta" "$STATE/review-task-c.meta"
+    cp "$STATE/review-task.meta" "$STATE/review-task-d.meta"
+    fm_nm_visibility_cache_write "$STATE/review-task.herdr-nm-activity" \
+      01VISIBILITYRUN reviewer working review 1000 1000 0 1045
+    fm_nm_visibility_refresh_task() { printf '%s\n' "$2" >> "$NM_LOG"; }
+    FM_NM_VISIBILITY_NOW=1030
+    FM_NM_VISIBILITY_MAX_TASKS_PER_CYCLE=1
+    FM_NM_VISIBILITY_POLL_SECONDS=15
+    FM_NM_VISIBILITY_TIMEOUT=3
+    _FM_NM_VISIBILITY_REFRESH_CURSOR=review-task-b
+    : > "$NM_LOG"
+    fm_nm_visibility_refresh_all "$STATE"
+    [ "$(cat "$NM_LOG")" = review-task ]
+  ); then
+    pass "fleet growth renews the projection nearest actual expiry first"
+  else
+    fail "fleet growth allowed an existing projection to expire"
+  fi
+}
+
 test_term_ignoring_herdr_is_killed() {
   local started elapsed
   started=$(date +%s)
@@ -535,5 +593,7 @@ test_invalid_log_tail_falls_back_and_preserves_hints
 test_top_level_failure_without_review_failure_is_visible
 test_metadata_report_and_clear_use_bounded_herdr
 test_capability_probe_retries_transient_failure
+test_transient_capability_failure_preserves_terminal_continuity
+test_fleet_growth_prioritizes_actual_expiry
 test_term_ignoring_herdr_is_killed
 test_refresh_cycle_is_bounded_and_fair
