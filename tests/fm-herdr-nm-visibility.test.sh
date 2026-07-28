@@ -17,6 +17,7 @@ WORKTREE="$TMP_ROOT/worktree"
 FAKEBIN="$TMP_ROOT/fakebin"
 HERDR_LOG="$TMP_ROOT/herdr.log"
 NM_LOG="$TMP_ROOT/no-mistakes.log"
+AGENT_NAME_FILE="$TMP_ROOT/agent-name"
 mkdir -p "$STATE" "$FAKEBIN" "$WORKTREE"
 fm_git_identity
 fm_git_init_commit "$WORKTREE"
@@ -55,7 +56,7 @@ export FM_FAKE_METADATA_CAPABLE FM_FAKE_AGENT_IDENTITY
 # Every fake Herdr call is unit-separated so assertions cannot confuse argument
 # boundaries with spaces inside human-facing labels.
 fm_backend_herdr_cli() {
-  local session=$1 arg name
+  local session=$1 arg name current_name=
   shift
   {
     printf 'session=%s' "$session"
@@ -63,9 +64,13 @@ fm_backend_herdr_cli() {
     printf '\n'
   } >> "$HERDR_LOG"
   case "${1:-} ${2:-}" in
-    "agent get") printf '{"result":{"agent":{"agent":"%s","agent_status":"working"}}}\n' "$FM_FAKE_AGENT_IDENTITY" ;;
+    "agent get")
+      [ ! -f "$AGENT_NAME_FILE" ] || current_name=$(cat "$AGENT_NAME_FILE")
+      printf '{"result":{"agent":{"agent":"%s","name":"%s","agent_status":"working"}}}\n' "$FM_FAKE_AGENT_IDENTITY" "$current_name"
+      ;;
     "agent rename")
       name=${4:-}
+      printf '%s' "$name" > "$AGENT_NAME_FILE"
       printf '{"result":{"agent":{"agent":"pi","name":"%s"}}}\n' "$name"
       ;;
     *) printf '{}\n' ;;
@@ -142,6 +147,7 @@ EOF
 reset_case() {
   : > "$HERDR_LOG"
   : > "$NM_LOG"
+  rm -f "$AGENT_NAME_FILE"
   rm -f "$STATE/review-task.herdr-nm-activity"
   rm -f "$STATE"/review-task-*.meta "$STATE/ineligible.meta"
   write_meta
@@ -340,9 +346,76 @@ test_pi_worker_name_is_unique_and_verified() {
   calls=$(cat "$HERDR_LOG")
   assert_contains "$calls" $'\x1f''agent'$'\x1f''get'$'\x1f''w1:p2' "Pi worker rename did not verify native identity"
   assert_contains "$calls" $'\x1f''agent'$'\x1f''rename'$'\x1f''w1:p2'$'\x1f''Pi · firstmate/review-task [w1:p2]' "Pi worker rename did not apply the task-specific name"
+  [ "$(grep -c $'\x1f''agent'$'\x1f''get'$'\x1f''w1:p2' "$HERDR_LOG")" -eq 2 ] || fail "Pi worker rename did not re-read the registered identity"
   assert_not_contains "$calls" $'\x1f''workspace'$'\x1f''rename' "Pi worker naming changed the shared workspace"
   assert_not_contains "$calls" $'\x1f''tab'$'\x1f''rename' "Pi worker naming changed the task tab"
   pass "Pi worker naming preserves native identity and shared workspace/tab topology"
+}
+
+test_pi_worker_name_waits_for_delayed_registration() {
+  local name calls_file="$TMP_ROOT/delayed-calls" renamed_file="$TMP_ROOT/delayed-name" calls
+  reset_case
+  printf '0' > "$calls_file"
+  name=$(fm_backend_herdr_pi_worker_name firstmate delayed ship w1:p3)
+  fm_backend_herdr_cli() {
+    local count
+    case "${2:-} ${3:-}" in
+      "agent get")
+        count=$(cat "$calls_file")
+        count=$((count + 1))
+        printf '%s' "$count" > "$calls_file"
+        if [ "$count" -lt 3 ]; then
+          printf '{"result":{"agent":null}}\n'
+        else
+          printf '{"result":{"agent":{"agent":"pi","name":"%s"}}}\n' "$([ ! -f "$renamed_file" ] || cat "$renamed_file")"
+        fi
+        ;;
+      "agent rename")
+        printf '%s' "${5:-}" > "$renamed_file"
+        printf '{"result":{"agent":{"agent":"pi","name":"%s"}}}\n' "${5:-}"
+        ;;
+    esac
+  }
+  FM_BACKEND_HERDR_PI_RENAME_POLLS=3
+  FM_BACKEND_HERDR_PI_RENAME_POLL_SLEEP=0
+  fm_backend_herdr_name_pi_worker fmtest:w1:p3 "$name" || fail "delayed Pi registration was not accepted"
+  calls=$(cat "$calls_file")
+  [ "$calls" -eq 4 ] || fail "delayed registration was not followed by final verification"
+  pass "Pi worker naming waits for delayed native registration"
+}
+
+test_pi_worker_name_fails_on_collision() {
+  local name
+  reset_case
+  name=$(fm_backend_herdr_pi_worker_name firstmate collision ship w1:p4)
+  fm_backend_herdr_cli() {
+    case "${2:-} ${3:-}" in
+      "agent get") printf '{"result":{"agent":{"agent":"pi","name":""}}}\n' ;;
+      "agent rename") return 1 ;;
+    esac
+  }
+  FM_BACKEND_HERDR_PI_RENAME_POLLS=1
+  FM_BACKEND_HERDR_PI_RENAME_POLL_SLEEP=0
+  if fm_backend_herdr_name_pi_worker fmtest:w1:p4 "$name"; then
+    fail "Pi name collision was accepted"
+  fi
+  pass "Pi worker naming fails closed on a name collision"
+}
+
+test_pi_prominence_requires_exact_valid_config() {
+  local config="$TMP_ROOT/herdr-config.toml"
+  herdr() {
+    [ "${1:-} ${2:-}" = "config check" ]
+  }
+  HERDR_CONFIG_PATH=$config
+  export HERDR_CONFIG_PATH
+  printf '[ui.sidebar.agents.rows_by_agent]\npi = [["state_icon", "workspace", "tab"], ["agent"]]\n' > "$config"
+  if fm_backend_herdr_pi_prominent_configured; then
+    fail "generic Herdr Pi row satisfied the prominence invariant"
+  fi
+  printf '[ui.sidebar.agents.rows_by_agent]\npi = [["state_icon", "agent", "tab"], ["state_text", "$nm_summary"]]\n' > "$config"
+  fm_backend_herdr_pi_prominent_configured || fail "documented prominent Pi row was rejected"
+  pass "Herdr Pi prominence requires the exact validated sidebar row"
 }
 
 test_pi_worker_name_refuses_non_pi_identity() {
@@ -367,6 +440,10 @@ test_spawn_applies_pi_name_after_launch_only_on_herdr() {
   local source enter_line condition_line rename_line success_line
   source=$(cat "$ROOT/bin/fm-spawn.sh")
   assert_contains "$source" 'if [ "$BACKEND" = herdr ] && [ "$HARNESS" = pi ]; then' "spawn lost the Herdr+Pi-only naming condition"
+  assert_contains "$source" 'fm_backend_herdr_pi_prominent_configured' "spawn does not preflight the prominent Pi presentation"
+  assert_contains "$source" 'fm_backend_herdr_projection_close_pane_focus_preserving "$HERDR_SES" "$HERDR_PANE_ID"' "failed Pi identity does not clean up only its exact pane"
+  assert_contains "$source" 'rm -f "$STATE/$ID.meta" "$STATE/$ID.herdr-nm-activity"' "failed Pi identity leaves authoritative task state after exact cleanup"
+  assert_contains "$source" 'add the following to $HERDR_PI_CONFIG and retry' "missing Pi presentation config lacks remediation"
   enter_line=$(grep -nF 'spawn_send_key "$T" Enter' "$ROOT/bin/fm-spawn.sh" | tail -1 | cut -d: -f1)
   condition_line=$(grep -nF 'if [ "$BACKEND" = herdr ] && [ "$HARNESS" = pi ]; then' "$ROOT/bin/fm-spawn.sh" | tail -1 | cut -d: -f1)
   rename_line=$(grep -nF 'fm_backend_herdr_name_pi_worker "$T" "$HERDR_PI_NAME"' "$ROOT/bin/fm-spawn.sh" | tail -1 | cut -d: -f1)
@@ -586,6 +663,7 @@ test_unsupported_capability_falls_back_without_side_effects
 test_non_herdr_backend_is_unchanged
 test_pi_worker_name_is_unique_and_verified
 test_pi_worker_name_refuses_non_pi_identity
+test_pi_prominence_requires_exact_valid_config
 test_spawn_applies_pi_name_after_launch_only_on_herdr
 test_cleanup_removes_only_the_private_visibility_cache
 test_watcher_owns_the_regular_observation_tick
@@ -598,3 +676,5 @@ test_transient_capability_failure_preserves_terminal_continuity
 test_fleet_growth_prioritizes_actual_expiry
 test_term_ignoring_herdr_is_killed
 test_refresh_cycle_is_bounded_and_fair
+test_pi_worker_name_waits_for_delayed_registration
+test_pi_worker_name_fails_on_collision

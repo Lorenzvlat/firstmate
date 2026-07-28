@@ -60,12 +60,14 @@ That is why several Pi workers in Firstmate's shared workspace all show the prom
 The protocol has no per-pane override for the built-in `workspace` token, and its schema has no nested-agent or child-agent relation.
 `agent.start` would create an independently interactive terminal, so Firstmate deliberately does not use it for No Mistakes visibility.
 
-Firstmate makes a bounded best-effort attempt to give every new Herdr-backed Pi worker a unique task-specific Herdr agent name after native Pi detection, such as `Pi · firstmate/review-a [w1:p2]`.
+Firstmate requires every new Herdr-backed Pi worker to receive a unique task-specific Herdr agent name after native Pi detection, such as `Pi · firstmate/review-a [w1:p2]`.
 The owner/task prefix is human-readable, and the response-derived pane suffix keeps the name distinct even if two homes sharing a session reuse an owner label and task id.
 Firstmate verifies `agent=pi` before calling `agent rename`, leaves that canonical identity unchanged, and never renames the shared workspace or the `fm-<id>` task tab.
-A shell or non-Pi agent is never renamed, and an unreadable pane keeps its ordinary tab identity after the bounded detection window.
+A shell or non-Pi agent is never renamed.
+Missing native registration, a conflicting name, a failed rename, or an unreadable verification response fails the spawn and closes only the exact failed task pane when focus-safe cleanup can be verified.
 
-To put that task-specific Pi name in the prominent first position rather than Herdr's shared workspace label, add this supported Herdr sidebar override to the operator's normal Herdr config:
+The task-specific Pi name must appear in the prominent first position rather than Herdr's shared workspace label.
+Add this supported Herdr sidebar override to the operator's normal Herdr config:
 
 ```toml
 [ui.sidebar.agents.rows_by_agent]
@@ -73,6 +75,7 @@ pi = [["state_icon", "agent", "tab"], ["state_text", "$nm_summary"]]
 ```
 
 Firstmate never edits or reloads the operator's Herdr config automatically.
+It validates the effective config and refuses a Herdr-backed Pi spawn with the exact remediation when this row is absent or invalid.
 The override uses only Herdr's documented canonical `pi` row selector, built-in `agent` and `tab` values, and the custom metadata token `$nm_summary`.
 When no review is active, the optional custom token is elided and the second row still shows Pi's native state text.
 

@@ -815,6 +815,15 @@ BRIEF_REAL="$BRIEF_DIR_REAL/$(basename "$BRIEF")"
 # (docs/herdr-backend.md "Known gaps").
 PROJ_ABS_REAL=$(cd "$PROJ_ABS" 2>/dev/null && pwd -P) || PROJ_ABS_REAL="$PROJ_ABS"
 
+if [ "$BACKEND" = herdr ] && [ "$HARNESS" = pi ] \
+   && ! fm_backend_herdr_pi_prominent_configured; then
+  HERDR_PI_CONFIG=$(fm_backend_herdr_pi_prominent_config_path 2>/dev/null || printf '<Herdr config.toml>')
+  echo "error: Herdr-backed Pi spawn requires a verified prominent task identity; add the following to $HERDR_PI_CONFIG and retry:" >&2
+  echo '[ui.sidebar.agents.rows_by_agent]' >&2
+  echo 'pi = [["state_icon", "agent", "tab"], ["state_text", "$nm_summary"]]' >&2
+  exit 1
+fi
+
 real_path_or_raw() {  # <path>
   local path=$1 real
   if real=$(cd "$path" 2>/dev/null && pwd -P); then
@@ -1517,20 +1526,25 @@ if [ "$HARNESS" = kimi ]; then
     exit 1
   fi
 fi
-# Herdr's default agent sidebar groups every task in this home's shared
-# workspace under the same prominent workspace label.
-# For Pi, wait for the native Pi registration and assign a unique task-specific
-# human-facing AgentInfo.name through Herdr's display-only naming API.
-# The pane id suffix keeps names unique across homes that share a Herdr session;
-# the tab/workspace topology and native `agent=pi` identity are unchanged.
 if [ "$BACKEND" = herdr ] && [ "$HARNESS" = pi ]; then
   HERDR_PI_OWNER=$(FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_workspace_label)
-  if HERDR_PI_NAME=$(fm_backend_herdr_pi_worker_name "$HERDR_PI_OWNER" "$ID" "$KIND" "$HERDR_PANE_ID"); then
-    if ! fm_backend_herdr_name_pi_worker "$T" "$HERDR_PI_NAME"; then
-      echo "warning: Herdr could not apply the task-specific Pi worker name for $ID; the worker is running under its ordinary tab" >&2
+  if ! HERDR_PI_NAME=$(fm_backend_herdr_pi_worker_name "$HERDR_PI_OWNER" "$ID" "$KIND" "$HERDR_PANE_ID") \
+     || ! fm_backend_herdr_name_pi_worker "$T" "$HERDR_PI_NAME"; then
+    echo "error: Herdr could not verify a unique task-specific Pi identity for $ID; closing only the failed task pane" >&2
+    if spawn_herdr_presentation_order_lock_acquire "$HERDR_SES"; then
+      if fm_backend_herdr_projection_close_pane_focus_preserving "$HERDR_SES" "$HERDR_PANE_ID"; then
+        rm -f "$STATE/$ID.meta" "$STATE/$ID.herdr-nm-activity"
+        if [ "${HERDR_PROJECTED:-0}" -eq 1 ]; then
+          rm -f "$HERDR_PRESENTATION_JOURNAL"
+        fi
+      else
+        echo "warning: Herdr could not safely close the failed task pane; inspect $T" >&2
+      fi
+      spawn_herdr_presentation_order_lock_release
+    else
+      echo "warning: Herdr could not acquire the presentation lock; inspect failed task pane $T" >&2
     fi
-  else
-    echo "warning: Herdr could not derive a safe task-specific Pi worker name for $ID; the worker is running under its ordinary tab" >&2
+    exit 1
   fi
 fi
 if [ "$KIND" = secondmate ]; then

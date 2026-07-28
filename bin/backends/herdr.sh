@@ -116,6 +116,39 @@ FM_BACKEND_HERDR_PRESENTATION_JOURNAL_SUFFIX=".herdr-presentation"
 FM_BACKEND_HERDR_PI_RENAME_POLLS=${FM_BACKEND_HERDR_PI_RENAME_POLLS:-50}
 FM_BACKEND_HERDR_PI_RENAME_POLL_SLEEP=${FM_BACKEND_HERDR_PI_RENAME_POLL_SLEEP:-0.2}
 
+fm_backend_herdr_pi_prominent_config_path() {
+  if [ -n "${HERDR_CONFIG_PATH:-}" ]; then
+    printf '%s\n' "$HERDR_CONFIG_PATH"
+  elif [ -n "${XDG_CONFIG_HOME:-}" ]; then
+    printf '%s/herdr/config.toml\n' "$XDG_CONFIG_HOME"
+  else
+    printf '%s/.config/herdr/config.toml\n' "$HOME"
+  fi
+}
+
+fm_backend_herdr_pi_prominent_configured() {
+  local config
+  config=$(fm_backend_herdr_pi_prominent_config_path) || return 1
+  [ -f "$config" ] && [ ! -L "$config" ] || return 1
+  HERDR_CONFIG_PATH="$config" herdr config check >/dev/null 2>&1 || return 1
+  awk '
+    /^[[:space:]]*\[/ {
+      section = $0
+      gsub(/[[:space:]]/, "", section)
+      next
+    }
+    section == "[ui.sidebar.agents.rows_by_agent]" {
+      row = $0
+      sub(/[[:space:]]*#.*/, "", row)
+      gsub(/[[:space:]]/, "", row)
+      if (row == "pi=[[\"state_icon\",\"agent\",\"tab\"],[\"state_text\",\"$nm_summary\"]]") {
+        found = 1
+      }
+    }
+    END { exit(found ? 0 : 1) }
+  ' "$config"
+}
+
 # fm_backend_herdr_workspace_label: the per-firstmate-HOME herdr workspace
 # label (docs/herdr-backend.md "Default task container shape"). The PRIMARY home (no
 # secondmate marker) resolves to the constant "firstmate", byte-identical to
@@ -172,7 +205,7 @@ fm_backend_herdr_pi_worker_name() { # <owner-label> <task-id> <kind> <pane-id>
 # A detected non-Pi identity returns 2 without mutation.
 # An absent/unreadable identity or rename failure returns 1 after a bounded wait.
 fm_backend_herdr_name_pi_worker() { # <target> <human-name>
-  local target=$1 human_name=$2 polls sleep_s attempt=0 out identity current renamed
+  local target=$1 human_name=$2 polls sleep_s attempt=0 out identity current renamed verified
   fm_backend_herdr_parse_target "$target" || return 1
   polls=$FM_BACKEND_HERDR_PI_RENAME_POLLS
   sleep_s=$FM_BACKEND_HERDR_PI_RENAME_POLL_SLEEP
@@ -194,7 +227,11 @@ fm_backend_herdr_name_pi_worker() { # <target> <human-name>
       printf '%s' "$renamed" | jq -e --arg want "$human_name" '
         .result.agent.agent == "pi" and .result.agent.name == $want
       ' >/dev/null 2>&1 || return 1
-      return 0
+      verified=$(fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" agent get "$FM_BACKEND_HERDR_PANE" 2>/dev/null) || return 1
+      printf '%s' "$verified" | jq -e --arg want "$human_name" '
+        .result.agent.agent == "pi" and .result.agent.name == $want
+      ' >/dev/null 2>&1
+      return
     fi
     [ -z "$identity" ] || return 2
     attempt=$((attempt + 1))
