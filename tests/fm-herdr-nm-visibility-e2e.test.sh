@@ -207,7 +207,8 @@ pass "real Herdr lab: completed activity cleans up deterministically and leaves 
 
 # Native TTL is the crash/abandonment cleanup backstop.
 FM_NM_VISIBILITY_ACTIVE_TTL_MS=150
-export FM_NM_VISIBILITY_ACTIVE_TTL_MS
+FM_NM_VISIBILITY_ACTIVE_TTL_EFFECTIVE_MS=150
+export FM_NM_VISIBILITY_ACTIVE_TTL_MS FM_NM_VISIBILITY_ACTIVE_TTL_EFFECTIVE_MS
 fm_nm_visibility_report "$SESSION:$PANE_A" "$NAME_A" reviewer working review 2000 reviewing active \
   || fail "short-TTL metadata report failed"
 sleep 0.4
