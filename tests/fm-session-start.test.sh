@@ -326,6 +326,8 @@ case "${1:-} ${2:-}" in
   "status --json")
     printf '%s\n' '{"client":{"protocol":14,"version":"test"},"server":{"running":true}}'
     ;;
+  "config check")
+    ;;
   "workspace list")
     printf '{"result":{"workspaces":[{"workspace_id":"ws1","label":"2ndmate-%s"}]}}\n' "$mate_id"
     ;;
@@ -364,11 +366,14 @@ case "${1:-} ${2:-}" in
     ;;
   "agent get")
     if [ "${3:-}" = p-new ] && [ -e "$spawned" ]; then
-      printf '%s\n' '{"result":{"agent":{"agent_status":"idle"}}}'
+      printf '%s\n' '{"result":{"agent":{"agent":"pi","name":"pi","agent_status":"idle"}}}'
     else
       printf '%s\n' '{"error":{"code":"agent_not_found"}}' >&2
       exit 1
     fi
+    ;;
+  "agent rename")
+    printf '{"result":{"agent":{"agent":"pi","name":"%s","agent_status":"idle"}}}\n' "${4:-}"
     ;;
   "pane close")
     [ "${3:-}" = p-old ] && : > "$killed"
@@ -468,13 +473,17 @@ EOF
   mate="$w/secondmate-$id"
   log="$w/herdr.log"
   state="$w/herdr.state"
-  mkdir -p "$mate/bin" "$mate/data" "$mate/state" "$mate/config" "$mate/projects"
+  mkdir -p "$mate/bin" "$mate/data" "$mate/state" "$mate/config" "$mate/projects" "$home/herdr"
   printf '%s\n' "$id" > "$mate/.fm-secondmate-home"
   printf '# Firstmate\n' > "$mate/AGENTS.md"
   printf 'Second mate charter.\n' > "$mate/data/charter.md"
   printf '%s\n' herdr > "$home/config/backend"
   printf '%s\n' pi > "$home/config/secondmate-harness"
   printf '%s\n' manual > "$home/config/backlog-backend"
+  cat > "$home/herdr/config.toml" <<'EOF'
+[ui.sidebar.agents.rows_by_agent]
+pi = [["state_icon", "agent", "tab"], ["state_text", "$nm_summary"]]
+EOF
   touch "$home/state/.last-watcher-beat"
   {
     printf 'window=default:p-old\n'
@@ -499,6 +508,7 @@ run_session_start_herdr_secondmate() {
   local root=$1 home=$2 fakebin=$3 mate=$4 log=$5 state=$6
   FM_BACKEND=herdr FM_FAKE_HERDR_LOG="$log" FM_FAKE_HERDR_STATE="$state" \
     FM_FAKE_SECOND_MATE_ID="$SESSION_START_HERDR_SECOND_MATE_ID" \
+    HERDR_CONFIG_PATH="$home/herdr/config.toml" \
     run_session_start "$home" "$root" "$fakebin:$BASE_PATH"
 }
 
