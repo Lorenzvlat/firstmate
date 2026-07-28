@@ -726,7 +726,9 @@ SH
   i=1
   while [ "$i" -le 40 ]; do
     (
-      harness_pid=$BASHPID
+      sleep 30 &
+      harness_pid=$!
+      trap 'kill "$harness_pid" 2>/dev/null || true' EXIT
       : > "$home/state/harness-$harness_pid"
       : > "$ready/$i"
       while [ "$(find "$ready" -type f | wc -l | tr -d ' ')" -lt 40 ]; do
@@ -741,6 +743,8 @@ SH
       while [ "$(find "$completed" -type f | wc -l | tr -d ' ')" -lt 40 ]; do
         sleep 0.01
       done
+      kill "$harness_pid" 2>/dev/null || true
+      trap - EXIT
     ) &
     pids="$pids $!"
     i=$((i + 1))
