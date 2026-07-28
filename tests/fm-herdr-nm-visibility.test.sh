@@ -359,6 +359,7 @@ test_pi_worker_name_waits_for_delayed_registration() {
   reset_case
   printf '0' > "$calls_file"
   name=$(fm_backend_herdr_pi_worker_name firstmate delayed ship w1:p3)
+  # shellcheck disable=SC2329 # Invoked indirectly by the sourced Herdr naming helper.
   fm_backend_herdr_cli() {
     local count
     case "${2:-} ${3:-}" in

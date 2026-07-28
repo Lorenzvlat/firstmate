@@ -822,6 +822,7 @@ if [ "$BACKEND" = herdr ] && [ "$HARNESS" = pi ] \
   HERDR_PI_CONFIG=$(fm_backend_herdr_pi_prominent_config_path 2>/dev/null || printf '<Herdr config.toml>')
   echo "error: Herdr-backed Pi spawn requires a verified prominent task identity; add the following to $HERDR_PI_CONFIG and retry:" >&2
   echo '[ui.sidebar.agents.rows_by_agent]' >&2
+  # shellcheck disable=SC2016 # The dollar-prefixed field is literal Herdr configuration.
   echo 'pi = [["state_icon", "agent", "tab"], ["state_text", "$nm_summary"]]' >&2
   exit 1
 fi
