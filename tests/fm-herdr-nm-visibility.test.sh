@@ -48,6 +48,8 @@ export PATH FM_FAKE_NM_LOG="$NM_LOG"
 fm_backend_source herdr
 # shellcheck source=bin/fm-herdr-nm-visibility-lib.sh
 . "$ROOT/bin/fm-herdr-nm-visibility-lib.sh"
+# shellcheck source=bin/fm-spawn-rollback-lib.sh
+. "$ROOT/bin/fm-spawn-rollback-lib.sh"
 
 FM_FAKE_METADATA_CAPABLE=1
 FM_FAKE_AGENT_IDENTITY=pi
@@ -442,7 +444,8 @@ test_spawn_applies_pi_name_after_launch_only_on_herdr() {
   assert_contains "$source" 'if [ "$BACKEND" = herdr ] && [ "$HARNESS" = pi ]; then' "spawn lost the Herdr+Pi-only naming condition"
   assert_contains "$source" 'fm_backend_herdr_pi_prominent_configured' "spawn does not preflight the prominent Pi presentation"
   assert_contains "$source" 'fm_backend_herdr_projection_close_pane_focus_preserving "$HERDR_SES" "$HERDR_PANE_ID"' "failed Pi identity does not clean up only its exact pane"
-  assert_contains "$source" 'rm -f "$STATE/$ID.meta" "$STATE/$ID.herdr-nm-activity"' "failed Pi identity leaves authoritative task state after exact cleanup"
+  assert_contains "$source" 'fm_backend_herdr_pane_agent_state "$HERDR_SES" "$HERDR_PANE_ID"' "failed Pi identity does not verify exact pane closure"
+  assert_contains "$source" 'fm_spawn_identity_rollback' "failed Pi identity bypasses complete spawn rollback"
   assert_contains "$source" 'add the following to $HERDR_PI_CONFIG and retry' "missing Pi presentation config lacks remediation"
   enter_line=$(grep -nF 'spawn_send_key "$T" Enter' "$ROOT/bin/fm-spawn.sh" | tail -1 | cut -d: -f1)
   condition_line=$(grep -nF 'if [ "$BACKEND" = herdr ] && [ "$HARNESS" = pi ]; then' "$ROOT/bin/fm-spawn.sh" | tail -1 | cut -d: -f1)
@@ -452,6 +455,39 @@ test_spawn_applies_pi_name_after_launch_only_on_herdr() {
   [ "$condition_line" -lt "$rename_line" ] || fail "Pi naming call escaped its Herdr+Pi condition"
   [ "$rename_line" -lt "$success_line" ] || fail "spawn reported success before attempting the Pi name"
   pass "new Herdr-backed Pi workers receive their task name after launch and before spawn success"
+}
+
+test_pi_identity_rollback_restores_metadata_on_failure() {
+  local root="$TMP_ROOT/rollback-root" home="$TMP_ROOT/rollback-home"
+  local state="$home/state" id=rollback-task task_tmp="/tmp/fm-rollback-task"
+  mkdir -p "$root/bin" "$state" "$task_tmp"
+  printf 'window=fmtest:w1:p9\nworktree=/worktree\nkind=ship\n' > "$state/$id.meta"
+  cat > "$root/bin/fm-teardown.sh" <<'SH'
+#!/usr/bin/env bash
+rm -f "$FM_HOME/state/rollback-task.meta"
+exit 19
+SH
+  chmod +x "$root/bin/fm-teardown.sh"
+  if fm_spawn_identity_rollback "$root" "$home" "$state" "$id" ship "$task_tmp" >/dev/null 2>&1; then
+    fail "failed delegated rollback reported success"
+  fi
+  assert_grep 'worktree=/worktree' "$state/$id.meta" "failed rollback did not restore diagnostic metadata"
+  rm -rf "$task_tmp"
+  pass "failed Pi identity rollback retains metadata for deterministic recovery"
+}
+
+test_secondmate_pi_identity_rollback_preserves_home() {
+  local root="$TMP_ROOT/secondmate-rollback-root" home="$TMP_ROOT/secondmate-rollback-home"
+  local state="$home/state" id=secondmate-task task_tmp="/tmp/fm-secondmate-task"
+  mkdir -p "$root/bin" "$state" "$task_tmp" "$home/preserved"
+  printf 'window=fmtest:w1:p10\nworktree=%s\nkind=secondmate\n' "$home" > "$state/$id.meta"
+  : > "$state/$id.pi-ext.ts"
+  fm_spawn_identity_rollback "$root" "$home" "$state" "$id" secondmate "$task_tmp" \
+    || fail "secondmate identity rollback failed"
+  [ -d "$home/preserved" ] || fail "secondmate rollback removed the persistent home"
+  [ ! -e "$task_tmp" ] || fail "secondmate rollback retained task temp"
+  [ ! -e "$state/$id.meta" ] || fail "secondmate rollback retained successful-spawn metadata"
+  pass "secondmate Pi identity rollback preserves its persistent home"
 }
 
 test_cleanup_removes_only_the_private_visibility_cache() {
@@ -665,6 +701,8 @@ test_pi_worker_name_is_unique_and_verified
 test_pi_worker_name_refuses_non_pi_identity
 test_pi_prominence_requires_exact_valid_config
 test_spawn_applies_pi_name_after_launch_only_on_herdr
+test_pi_identity_rollback_restores_metadata_on_failure
+test_secondmate_pi_identity_rollback_preserves_home
 test_cleanup_removes_only_the_private_visibility_cache
 test_watcher_owns_the_regular_observation_tick
 test_zero_elapsed_does_not_cross_run_cache

@@ -138,6 +138,8 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 . "$SCRIPT_DIR/fm-backend.sh"
 # shellcheck source=bin/fm-gate-refuse-lib.sh
 . "$SCRIPT_DIR/fm-gate-refuse-lib.sh"
+# shellcheck source=bin/fm-spawn-rollback-lib.sh
+. "$SCRIPT_DIR/fm-spawn-rollback-lib.sh"
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
 # Fail closed before any fleet mutation: a no-mistakes gate agent must never spawn
@@ -1533,14 +1535,23 @@ if [ "$BACKEND" = herdr ] && [ "$HARNESS" = pi ]; then
     echo "error: Herdr could not verify a unique task-specific Pi identity for $ID; closing only the failed task pane" >&2
     if spawn_herdr_presentation_order_lock_acquire "$HERDR_SES"; then
       if fm_backend_herdr_projection_close_pane_focus_preserving "$HERDR_SES" "$HERDR_PANE_ID"; then
-        rm -f "$STATE/$ID.meta" "$STATE/$ID.herdr-nm-activity"
-        if [ "${HERDR_PROJECTED:-0}" -eq 1 ]; then
-          rm -f "$HERDR_PRESENTATION_JOURNAL"
+        if [ "$(fm_backend_herdr_pane_agent_state "$HERDR_SES" "$HERDR_PANE_ID")" = dead ]; then
+          if [ "${HERDR_PROJECTED:-0}" -eq 1 ]; then
+            rm -f "$HERDR_PRESENTATION_JOURNAL"
+          fi
+          spawn_herdr_presentation_order_lock_release
+          if ! fm_spawn_identity_rollback \
+            "$FM_ROOT" "$FM_HOME" "$STATE" "$ID" "$KIND" "$TASK_TMP"; then
+            echo "error: Herdr Pi identity rollback for $ID is incomplete; retry teardown using retained metadata" >&2
+          fi
+        else
+          echo "warning: Herdr task-pane close was not confirmed; retaining metadata for $ID" >&2
+          spawn_herdr_presentation_order_lock_release
         fi
       else
         echo "warning: Herdr could not safely close the failed task pane; inspect $T" >&2
+        spawn_herdr_presentation_order_lock_release
       fi
-      spawn_herdr_presentation_order_lock_release
     else
       echo "warning: Herdr could not acquire the presentation lock; inspect failed task pane $T" >&2
     fi
