@@ -213,12 +213,6 @@ chmod 600 "$work_dir/supervise.py" || fail "could not protect the Codex supervis
 run_supervised() {
   local status=0
   python3 "$work_dir/supervise.py" "$work_dir" "$1" "$2" &
-  if [ "${FM_MEMORIZE_TEST_HOLD_SUPERVISOR_REGISTRATION:-}" = 1 ]; then
-    : > "$work_dir/supervisor-registration-held"
-    while [ ! -e "$work_dir/supervisor-registration-release" ]; do
-      sleep 0.05
-    done
-  fi
   run_pid=$!
   wait "$run_pid" || status=$?
   run_pid=
@@ -302,9 +296,6 @@ On any configuration, authentication, tool, or write failure, return success=fal
 EOF
 
 codex_status=0
-if [ -n "${FM_MEMORIZE_TEST_POST_DISCOVERY_DELAY:-}" ]; then
-  sleep "$FM_MEMORIZE_TEST_POST_DISCOVERY_DELAY"
-fi
 remaining_secs=$((timeout_secs - (SECONDS - started_at)))
 if [ "$remaining_secs" -le 0 ]; then
   fail "the memorize deadline expired after MCP discovery but before Codex could begin an OpenBrain write; nothing was saved and it is safe to retry" 3

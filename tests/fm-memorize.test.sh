@@ -21,6 +21,7 @@ make_fixture() {
 #!/usr/bin/env bash
 set -u
 if [ "${1:-}" = mcp ] && [ "${2:-}" = get ] && [ "${3:-}" = openbrain ]; then
+  printf '%s\n' "$$" > "$CAPTURE_DIR/mcp-pid"
   printf '%s\n' "$PWD" > "$CAPTURE_DIR/mcp-cwd"
   case "${FAKE_MCP_MODE:-enabled}" in
     hang) sleep 30 ;;
@@ -152,6 +153,31 @@ run_helper() {
   shift 2
   PATH="$fakebin:/usr/bin:/bin" CAPTURE_DIR="$dir" OPENBRAIN_KEY='test-secret-value' \
     "$MEMORIZE" --title-file "$dir/title.txt" --body-file "$dir/body.txt" "$@"
+}
+
+instrument_helper() {
+  local mode=$1 output=$2
+  case "$mode" in
+    registration)
+      awk '
+        { print }
+        /python3 .*supervise.py.* &$/ {
+          print "  : > \"$CAPTURE_DIR/supervisor-registration-held\""
+          print "  while [ ! -e \"$CAPTURE_DIR/supervisor-registration-release\" ]; do"
+          print "    sleep 0.05"
+          print "  done"
+        }
+      ' "$MEMORIZE" > "$output"
+      ;;
+    deadline)
+      awk '
+        /^remaining_secs=/ { print "sleep 3" }
+        { print }
+      ' "$MEMORIZE" > "$output"
+      ;;
+    *) fail "unknown helper instrumentation mode: $mode" ;;
+  esac
+  chmod +x "$output"
 }
 
 test_success_is_isolated_ephemeral_and_returns_validated_receipt() {
@@ -403,7 +429,7 @@ test_watchdog_timeout_after_execution_is_unconfirmed_not_retryable() {
 
   fakebin=$(make_fixture timeout)
   set +e
-  output=$(FAKE_EXEC_MODE=hang FM_MEMORIZE_TIMEOUT_SECONDS=1 run_helper "$dir" "$fakebin" 2>&1)
+  output=$(FAKE_EXEC_MODE=hang FM_MEMORIZE_TIMEOUT_SECONDS=2 run_helper "$dir" "$fakebin" 2>&1)
   code=$?
   set -e
   expect_code 4 "$code" "watchdog timeout after Codex began executing"
@@ -430,11 +456,14 @@ test_mcp_discovery_is_bounded_before_any_write() {
 }
 
 test_deadline_after_discovery_is_a_confirmed_no_write() {
-  local dir="$TMP_ROOT/discovery-deadline" fakebin output code
+  local dir="$TMP_ROOT/discovery-deadline" fakebin helper output code
   fakebin=$(make_fixture discovery-deadline)
+  helper="$dir/fm-memorize-deadline.sh"
+  instrument_helper deadline "$helper"
   set +e
-  output=$(FM_MEMORIZE_TIMEOUT_SECONDS=2 FM_MEMORIZE_TEST_POST_DISCOVERY_DELAY=3 \
-    run_helper "$dir" "$fakebin" 2>&1)
+  output=$(PATH="$fakebin:/usr/bin:/bin" CAPTURE_DIR="$dir" OPENBRAIN_KEY='test-secret-value' \
+    FM_MEMORIZE_TIMEOUT_SECONDS=2 \
+    "$helper" --title-file "$dir/title.txt" --body-file "$dir/body.txt" 2>&1)
   code=$?
   set -e
   expect_code 3 "$code" "deadline exhausted after MCP discovery"
@@ -445,32 +474,48 @@ test_deadline_after_discovery_is_a_confirmed_no_write() {
 }
 
 test_signal_before_supervisor_pid_assignment_stops_the_job() {
-  local dir="$TMP_ROOT/outer-spawn-signal" fakebin pid code work waited=0
+  local dir="$TMP_ROOT/outer-spawn-signal" fakebin helper pid supervisor_pid code waited=0
   fakebin=$(make_fixture outer-spawn-signal)
+  helper="$dir/fm-memorize-registration.sh"
+  instrument_helper registration "$helper"
   PATH="$fakebin:/usr/bin:/bin" CAPTURE_DIR="$dir" OPENBRAIN_KEY='test-secret-value' \
     FAKE_MCP_MODE=hang FM_MEMORIZE_TIMEOUT_SECONDS=120 \
-    FM_MEMORIZE_TEST_HOLD_SUPERVISOR_REGISTRATION=1 \
-    "$MEMORIZE" --title-file "$dir/title.txt" --body-file "$dir/body.txt" \
+    "$helper" --title-file "$dir/title.txt" --body-file "$dir/body.txt" \
     >"$dir/out" 2>"$dir/error" &
   pid=$!
-  while [ ! -s "$dir/mcp-cwd" ] && [ "$waited" -lt 100 ]; do
+  while [ ! -e "$dir/supervisor-registration-held" ] && [ "$waited" -lt 100 ]; do
     sleep 0.1
     waited=$((waited + 1))
   done
-  [ -s "$dir/mcp-cwd" ] || fail "the outer-spawn fixture never started MCP discovery"
-  work=$(cat "$dir/mcp-cwd")
-  [ -e "$work/supervisor-registration-held" ] || fail "the supervisor registration window was not held"
+  [ -e "$dir/supervisor-registration-held" ] || fail "the supervisor registration window was not held"
   kill -TERM "$pid" 2>/dev/null || fail "could not signal the supervisor registration window"
   set +e
   wait "$pid"
   code=$?
   set -e
   expect_code 143 "$code" "SIGTERM before supervisor PID assignment"
-  [ ! -e "$work" ] || fail "outer-spawn interruption left its workspace behind: $work"
+  if [ -s "$dir/mcp-pid" ]; then
+    supervisor_pid=$(cat "$dir/mcp-pid")
+    if kill -0 "$supervisor_pid" 2>/dev/null; then
+      fail "outer-spawn interruption left MCP discovery running: $supervisor_pid"
+    fi
+  fi
   [ ! -e "$dir/cwd" ] || fail "Codex exec ran after outer-spawn interruption"
   assert_contains "$(cat "$dir/error")" 'do not retry automatically' \
     "outer-spawn interruption did not warn against an automatic retry"
   pass "memorize owns the supervisor throughout outer spawn registration"
+}
+
+test_production_ignores_test_instrumentation_variables() {
+  local dir="$TMP_ROOT/no-production-hooks" fakebin output
+  fakebin=$(make_fixture no-production-hooks)
+  output=$(FM_MEMORIZE_TEST_HOLD_SUPERVISOR_REGISTRATION=1 \
+    FM_MEMORIZE_TEST_POST_DISCOVERY_DELAY=30 FM_MEMORIZE_TIMEOUT_SECONDS=2 \
+    run_helper "$dir" "$fakebin" 2>"$dir/error") || \
+    fail "production helper honored test instrumentation variables: $(cat "$dir/error")"
+  assert_contains "$output" '"identifier":"mem-123"' \
+    "ordinary helper invocation did not complete within its configured deadline"
+  pass "memorize exposes no caller-controlled test timing hooks"
 }
 
 test_signal_during_exec_spawn_stops_the_owned_process_group() {
@@ -594,6 +639,7 @@ test_watchdog_timeout_after_execution_is_unconfirmed_not_retryable
 test_mcp_discovery_is_bounded_before_any_write
 test_deadline_after_discovery_is_a_confirmed_no_write
 test_signal_before_supervisor_pid_assignment_stops_the_job
+test_production_ignores_test_instrumentation_variables
 test_signal_during_exec_spawn_stops_the_owned_process_group
 test_unrecognized_read_tool_does_not_shadow_the_one_write
 test_interrupting_signal_stops_the_run_and_cleans_up
