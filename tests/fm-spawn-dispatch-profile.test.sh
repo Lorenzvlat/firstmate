@@ -13,6 +13,21 @@ set -u
 SPAWN="$ROOT/bin/fm-spawn.sh"
 TMP_ROOT=$(fm_test_tmproot fm-spawn-dispatch-profile)
 
+cleanup_spawn_telemetry() {
+  local control state id meta tasktmp
+  while IFS= read -r -d '' control; do
+    state=$(dirname "$control")
+    id=$(basename "$control" .claude-telemetry.json)
+    FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-claude-telemetry.sh" stop "$id" >/dev/null 2>&1 || true
+  done < <(find "$TMP_ROOT" -type f -name '*.claude-telemetry.json' -print0 2>/dev/null)
+  while IFS= read -r -d '' meta; do
+    tasktmp=$(grep '^tasktmp=' "$meta" 2>/dev/null | cut -d= -f2- || true)
+    case "$tasktmp" in /tmp/fm-profile-*) rm -rf "$tasktmp" ;; esac
+  done < <(find "$TMP_ROOT" -type f -name '*.meta' -print0 2>/dev/null)
+  fm_test_cleanup
+}
+trap cleanup_spawn_telemetry EXIT
+
 make_spawn_fakebin() {
   local dir=$1 fakebin
   fakebin=$(fm_fakebin "$dir")
@@ -42,6 +57,15 @@ esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"
+  cat > "$fakebin/claude" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-} ${2:-}" = "auth status" ]; then
+  printf '%s\n' '{"loggedIn":true,"authMethod":"claude.ai","apiProvider":"firstParty","subscriptionType":"pro"}'
+  exit 0
+fi
+exit 1
+SH
+  chmod +x "$fakebin/claude"
   fm_fake_exit0 "$fakebin" treehouse
   printf '%s\n' "$fakebin"
 }
@@ -105,6 +129,10 @@ assert_meta_profile() {
   assert_grep "effort=$effort" "$meta" "meta missing effort=$effort"
 }
 
+assert_meta_selection_reason() {
+  assert_grep "selection_reason=$2" "$1" "meta missing selection_reason=$2"
+}
+
 test_no_profile_keeps_claude_profile_defaults() {
   local rec id out status expected launch
   id=profile-off-z1
@@ -116,10 +144,14 @@ test_no_profile_keeps_claude_profile_defaults() {
   expect_code 0 "$status" "claude spawn without profile flags should succeed"
   assert_contains "$out" "spawned $id harness=claude" "spawn did not report claude"
   assert_meta_profile "$HOME_DIR/state/$id.meta" claude default default
+  assert_meta_selection_reason "$HOME_DIR/state/$id.meta" unavailable
 
   launch=$(cat "$LAUNCH_LOG")
-  expected="CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions \"\$('${ROOT}/bin/fm-operational-input.sh' encode launch-brief < '$HOME_DIR/data/$id/brief.md')\""
+  expected=". '/tmp/fm-$id/claude-telemetry.env' && CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions \"\$('${ROOT}/bin/fm-operational-input.sh' encode launch-brief < '$HOME_DIR/data/$id/brief.md')\""
   [ "$launch" = "$expected" ] || fail "no-profile claude launch did not use the canonical launch kind"$'\n'"expected: $expected"$'\n'"actual:   $launch"
+  assert_present "$HOME_DIR/state/$id.telemetry.json" "Claude spawn did not initialize private telemetry"
+  assert_grep '"statusLine"' "$WT_DIR/.claude/settings.local.json" "Claude spawn did not merge the official status-line producer"
+  assert_grep "OTEL_LOG_RAW_API_BODIES='0'" "/tmp/fm-$id/claude-telemetry.env" "Claude spawn did not pin raw API bodies off"
   pass "no --model/--effort records defaults and types the claude launch instructions"
 }
 
@@ -214,10 +246,12 @@ test_claude_threads_model_and_effort() {
   rec=$(make_spawn_case profile-claude claude "$id")
   read_case_record "$rec"
 
-  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --model sonnet --effort high)
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --model sonnet --effort high --selection-reason matched_dispatch_rule)
   status=$?
   expect_code 0 "$status" "claude spawn with profile flags should succeed"
   assert_meta_profile "$HOME_DIR/state/$id.meta" claude sonnet high
+  assert_meta_selection_reason "$HOME_DIR/state/$id.meta" matched_dispatch_rule
   launch=$(cat "$LAUNCH_LOG")
   assert_contains "$launch" "claude --dangerously-skip-permissions --model 'sonnet' --effort 'high'" \
     "claude launch did not thread model and effort flags"
@@ -348,6 +382,11 @@ test_pi_threads_model_and_max_effort() {
     "pi launch still exports the removed Calm input-reroute binding"
   assert_contains "$launch" "fm-operational-input.sh' encode launch-brief" \
     "pi launch lost the canonical typed launch-brief envelope"
+  assert_grep 'pi.on("message_end"' "$HOME_DIR/state/$id.pi-ext.ts" \
+    "Pi spawn did not generate the finalized-usage producer"
+  assert_no_grep 'message.content' "$HOME_DIR/state/$id.pi-ext.ts" \
+    "Pi spawn generated a content-reading extension"
+  assert_present "$HOME_DIR/state/$id.telemetry.json" "Pi spawn did not initialize private telemetry"
   pass "pi receives --model and --thinking max profile flags"
 }
 
@@ -360,13 +399,16 @@ test_batch_forwards_shared_profile_flags() {
   enable_dispatch_profile "$HOME_DIR"
 
   out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
-    "$id1=$PROJ_DIR" "$id2=$PROJ_DIR" --harness codex --model gpt-5 --effort high)
+    "$id1=$PROJ_DIR" "$id2=$PROJ_DIR" --harness codex --model gpt-5 --effort high \
+    --selection-reason configured_default)
   status=$?
   expect_code 0 "$status" "batch spawn with shared profile flags should succeed"
   assert_contains "$out" "spawned $id1 harness=codex" "first batch task did not use shared harness"
   assert_contains "$out" "spawned $id2 harness=codex" "second batch task did not use shared harness"
   assert_meta_profile "$HOME_DIR/state/$id1.meta" codex gpt-5 high
   assert_meta_profile "$HOME_DIR/state/$id2.meta" codex gpt-5 high
+  assert_meta_selection_reason "$HOME_DIR/state/$id1.meta" configured_default
+  assert_meta_selection_reason "$HOME_DIR/state/$id2.meta" configured_default
   pass "batch dispatch forwards shared --harness, --model, and --effort to every pair"
 }
 
@@ -388,6 +430,22 @@ test_active_dispatch_profile_does_not_block_secondmate_launch() {
   pass "active crew-dispatch profile does not block secondmate launches"
 }
 
+test_selection_reason_rejects_prose() {
+  local rec id out status
+  id=profile-reason-reject-z17
+  rec=$(make_spawn_case profile-reason-reject codex "$id")
+  read_case_record "$rec"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" --selection-reason 'Use the secret preferred profile')
+  status=$?
+  expect_code 1 "$status" "natural-language model selection rationale should be rejected"
+  assert_contains "$out" "--selection-reason must be a fixed model-selection reason" \
+    "selection rationale refusal did not identify the fixed enum"
+  assert_absent "$HOME_DIR/state/$id.meta" "rejected rationale should not create task metadata"
+  pass "selection reason accepts only fixed provenance codes and rejects strategy prose"
+}
+
 test_no_profile_keeps_claude_profile_defaults
 test_active_dispatch_profile_requires_explicit_harness_for_ship
 test_active_dispatch_profile_requires_explicit_harness_for_scout
@@ -404,5 +462,6 @@ test_opencode_threads_model_and_ignores_effort_axis
 test_pi_threads_model_and_max_effort
 test_batch_forwards_shared_profile_flags
 test_active_dispatch_profile_does_not_block_secondmate_launch
+test_selection_reason_rejects_prose
 
 echo "# all fm-spawn-dispatch-profile tests passed"

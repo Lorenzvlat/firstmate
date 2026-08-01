@@ -312,11 +312,19 @@
       "audience": "maintainer-verification"
     },
     {
+      "path": "docs/verification/worker-telemetry.md",
+      "audience": "maintainer-verification"
+    },
+    {
       "path": "docs/watcher-continuity.md",
       "audience": "operator-current"
     },
     {
       "path": "docs/wedge-alarm.md",
+      "audience": "operator-current"
+    },
+    {
+      "path": "docs/worker-telemetry.md",
       "audience": "operator-current"
     },
     {
