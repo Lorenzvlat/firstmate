@@ -23,6 +23,7 @@ set -u
 if [ "${1:-}" = mcp ] && [ "${2:-}" = get ] && [ "${3:-}" = openbrain ]; then
   printf '%s\n' "$PWD" > "$CAPTURE_DIR/mcp-cwd"
   case "${FAKE_MCP_MODE:-enabled}" in
+    hang) sleep 30 ;;
     missing) exit 1 ;;
     disabled)
       printf 'openbrain\n  enabled: false\n  bearer_token_env_var: OPENBRAIN_KEY\n'
@@ -37,6 +38,12 @@ if [ "${1:-}" = mcp ] && [ "${2:-}" = get ] && [ "${3:-}" = openbrain ]; then
   exit 0
 fi
 [ "${1:-}" = exec ] || exit 91
+if [ "${FAKE_EXEC_MODE:-success}" = spawn-race ]; then
+  : > "$CAPTURE_DIR/exec-started"
+  printf '%s\n' "$$" > "$CAPTURE_DIR/spawn-race-pid"
+  sleep 30
+  exit 0
+fi
 printf '%s\n' "$$" > "$CAPTURE_DIR/codex-pid"
 printf '%s\n' "$PWD" > "$CAPTURE_DIR/cwd"
 printf '%s\n' "$@" > "$CAPTURE_DIR/args"
@@ -162,10 +169,13 @@ test_success_is_isolated_ephemeral_and_returns_validated_receipt() {
   assert_not_contains "$output$(cat "$dir/error")" 'test-secret-value' "helper leaked authentication value"
   cwd=$(cat "$dir/cwd")
   [ "$(cat "$dir/mcp-cwd")" = "$cwd" ] || fail "Codex MCP discovery ran outside the isolated directory"
-  case "$cwd" in
-    "${TMPDIR:-/tmp}"fm-memorize.*|"${TMPDIR:-/tmp}"/fm-memorize.*) : ;;
-    *) fail "Codex did not run in its isolated temporary directory: $cwd" ;;
-  esac
+  python3 - "$cwd" "${TMPDIR:-/tmp}" <<'PY' || fail "Codex did not run in its isolated temporary directory: $cwd"
+import pathlib
+import sys
+cwd = pathlib.Path(sys.argv[1]).resolve()
+temp_root = pathlib.Path(sys.argv[2]).resolve()
+assert cwd.parent == temp_root and cwd.name.startswith("fm-memorize.")
+PY
   [ "$cwd" != "$ROOT" ] || fail "Codex ran inside the Firstmate repository"
   [ ! -e "$cwd" ] || fail "Codex temporary directory was not cleaned up"
   args=$(cat "$dir/args")
@@ -406,6 +416,47 @@ test_watchdog_timeout_after_execution_is_unconfirmed_not_retryable() {
   pass "memorize treats a watchdog timeout as an unconfirmed write that must not be retried"
 }
 
+test_mcp_discovery_is_bounded_before_any_write() {
+  local dir="$TMP_ROOT/mcp-timeout" fakebin output code
+  fakebin=$(make_fixture mcp-timeout)
+  set +e
+  output=$(FAKE_MCP_MODE=hang FM_MEMORIZE_TIMEOUT_SECONDS=1 run_helper "$dir" "$fakebin" 2>&1)
+  code=$?
+  set -e
+  expect_code 3 "$code" "MCP discovery timeout"
+  assert_contains "$output" 'discovery timed out' "MCP discovery timeout lacked a stable blocker"
+  [ ! -e "$dir/cwd" ] || fail "Codex write ran after MCP discovery timed out"
+  pass "memorize bounds MCP discovery before any OpenBrain write"
+}
+
+test_signal_during_exec_spawn_stops_the_owned_process_group() {
+  local dir="$TMP_ROOT/spawn-signal" fakebin pid codex_pid code waited=0
+  fakebin=$(make_fixture spawn-signal)
+  PATH="$fakebin:/usr/bin:/bin" CAPTURE_DIR="$dir" OPENBRAIN_KEY='test-secret-value' \
+    FAKE_EXEC_MODE=spawn-race FM_MEMORIZE_TIMEOUT_SECONDS=120 \
+    "$MEMORIZE" --title-file "$dir/title.txt" --body-file "$dir/body.txt" \
+    >"$dir/out" 2>"$dir/error" &
+  pid=$!
+  while [ ! -e "$dir/exec-started" ] && [ "$waited" -lt 100 ]; do
+    sleep 0.1
+    waited=$((waited + 1))
+  done
+  [ -e "$dir/exec-started" ] || fail "the spawn-race fixture never started Codex"
+  codex_pid=$(cat "$dir/spawn-race-pid")
+  kill -TERM "$pid" 2>/dev/null || fail "could not signal the spawn-race run"
+  set +e
+  wait "$pid"
+  code=$?
+  set -e
+  expect_code 143 "$code" "SIGTERM during Codex spawn"
+  if kill -0 "$codex_pid" 2>/dev/null; then
+    fail "spawn-race Codex process survived cleanup: $codex_pid"
+  fi
+  assert_contains "$(cat "$dir/error")" 'do not retry automatically' \
+    "spawn-race interruption did not warn against an automatic retry"
+  pass "memorize owns the Codex process group before signal cleanup"
+}
+
 test_unrecognized_read_tool_does_not_shadow_the_one_write() {
   local dir="$TMP_ROOT/unknown-read" fakebin output
   fakebin=$(make_fixture unknown-read)
@@ -496,6 +547,8 @@ test_recorded_content_must_match_the_submitted_payload
 test_completed_write_without_full_openbrain_detail_is_uncertain_not_retryable
 test_proven_absence_of_a_write_stays_retryable
 test_watchdog_timeout_after_execution_is_unconfirmed_not_retryable
+test_mcp_discovery_is_bounded_before_any_write
+test_signal_during_exec_spawn_stops_the_owned_process_group
 test_unrecognized_read_tool_does_not_shadow_the_one_write
 test_interrupting_signal_stops_the_run_and_cleans_up
 test_local_input_safety_and_skill_contract

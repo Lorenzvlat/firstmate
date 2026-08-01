@@ -96,45 +96,18 @@ command -v codex >/dev/null 2>&1 || fail "Codex CLI is unavailable" 3
 
 work_dir=$(mktemp -d "${TMPDIR:-/tmp}/fm-memorize.XXXXXX") || fail "could not create an isolated temporary directory" 3
 run_pid=
-codex_pid_file="$work_dir/codex.pid"
-watchdog_pid_file="$work_dir/watchdog.pid"
 cleanup() {
   rm -rf "$work_dir"
 }
-child_pids() {
-  local pid_file pid
-  for pid_file in "$codex_pid_file" "$watchdog_pid_file"; do
-    pid=$(cat "$pid_file" 2>/dev/null) || continue
-    case "$pid" in
-      ''|*[!0-9]*) continue ;;
-    esac
-    printf '%s\n' "$pid"
-  done
-}
 terminate_run() {
-  local pid waited alive
-  if [ -n "$run_pid" ]; then
-    kill -TERM "$run_pid" 2>/dev/null
-  fi
-  for pid in $(child_pids); do
-    kill -TERM "$pid" 2>/dev/null
-  done
-  waited=0
-  while [ "$waited" -lt 20 ]; do
-    alive=
-    for pid in $(child_pids); do
-      if kill -0 "$pid" 2>/dev/null; then
-        alive=1
-      fi
-    done
-    [ -n "$alive" ] || return 0
+  local waited=0
+  [ -n "$run_pid" ] || return 0
+  kill -TERM "$run_pid" 2>/dev/null
+  while kill -0 "$run_pid" 2>/dev/null && [ "$waited" -lt 30 ]; do
     sleep 0.1
     waited=$((waited + 1))
   done
-  for pid in $(child_pids); do
-    kill -KILL "$pid" 2>/dev/null
-  done
-  return 0
+  kill -KILL "$run_pid" 2>/dev/null
 }
 interrupted() {
   terminate_run
@@ -149,7 +122,96 @@ trap 'interrupted SIGINT 130' INT
 trap 'interrupted SIGTERM 143' TERM
 chmod 700 "$work_dir" || fail "could not protect the isolated temporary directory" 3
 
-mcp_info=$(cd "$work_dir" && codex mcp get openbrain 2>/dev/null) || fail "Codex has no available openbrain MCP server" 3
+cat > "$work_dir/supervise.py" <<'PY'
+import os
+import pathlib
+import signal
+import subprocess
+import sys
+
+work_path = pathlib.Path(sys.argv[1])
+timeout = int(sys.argv[2])
+mode = sys.argv[3]
+child = None
+
+
+def stop_child(sig):
+    if child is None or child.poll() is not None:
+        return
+    try:
+        os.killpg(child.pid, sig)
+        child.wait(timeout=2)
+    except (ProcessLookupError, subprocess.TimeoutExpired):
+        try:
+            os.killpg(child.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        child.wait()
+
+
+def interrupted(sig, _frame):
+    stop_child(signal.SIGTERM)
+    raise SystemExit(128 + sig)
+
+
+for handled_signal in (signal.SIGHUP, signal.SIGINT, signal.SIGTERM):
+    signal.signal(handled_signal, interrupted)
+
+blocked = {signal.SIGHUP, signal.SIGINT, signal.SIGTERM}
+old_mask = signal.pthread_sigmask(signal.SIG_BLOCK, blocked)
+try:
+    if mode == "mcp":
+        stdout = (work_path / "mcp-info").open("wb")
+        stderr = subprocess.DEVNULL
+        stdin = subprocess.DEVNULL
+        command = ["codex", "mcp", "get", "openbrain"]
+    else:
+        stdin = (work_path / "instructions.txt").open("rb")
+        stdout = (work_path / "events.jsonl").open("wb")
+        stderr = (work_path / "codex.stderr").open("wb")
+        command = [
+            "codex", "exec", "--ephemeral", "--ignore-rules",
+            "--skip-git-repo-check", "--sandbox", "read-only", "--json",
+            "--output-schema", "receipt.schema.json",
+            "--output-last-message", "receipt.json", "-",
+        ]
+    child = subprocess.Popen(
+        command,
+        cwd=work_path,
+        stdin=stdin,
+        stdout=stdout,
+        stderr=stderr,
+        start_new_session=True,
+    )
+finally:
+    signal.pthread_sigmask(signal.SIG_SETMASK, old_mask)
+
+try:
+    status = child.wait(timeout=timeout)
+except subprocess.TimeoutExpired:
+    stop_child(signal.SIGTERM)
+    raise SystemExit(124)
+raise SystemExit(status)
+PY
+chmod 600 "$work_dir/supervise.py" || fail "could not protect the Codex supervisor" 3
+
+run_supervised() {
+  local status=0
+  python3 "$work_dir/supervise.py" "$work_dir" "$1" "$2" &
+  run_pid=$!
+  wait "$run_pid" || status=$?
+  run_pid=
+  return "$status"
+}
+
+started_at=$SECONDS
+mcp_status=0
+run_supervised "$timeout_secs" mcp || mcp_status=$?
+if [ "$mcp_status" -eq 124 ]; then
+  fail "Codex MCP discovery timed out before any OpenBrain write; it is safe to retry after fixing the blocker" 3
+fi
+[ "$mcp_status" -eq 0 ] || fail "Codex has no available openbrain MCP server" 3
+mcp_info=$(cat "$work_dir/mcp-info") || fail "Codex MCP discovery did not return usable configuration" 3
 printf '%s\n' "$mcp_info" | grep -Eq '^[[:space:]]*enabled:[[:space:]]*true[[:space:]]*$' || \
   fail "Codex's openbrain MCP server is disabled" 3
 auth_env=$(printf '%s\n' "$mcp_info" | awk -F: '/^[[:space:]]*bearer_token_env_var:/ { sub(/^[^:]*:[[:space:]]*/, ""); print; exit }')
@@ -219,48 +281,16 @@ On any configuration, authentication, tool, or write failure, return success=fal
 EOF
 
 codex_status=0
-(
-  cd "$work_dir" || exit 1
-  codex exec \
-    --ephemeral \
-    --ignore-rules \
-    --skip-git-repo-check \
-    --sandbox read-only \
-    --json \
-    --output-schema receipt.schema.json \
-    --output-last-message receipt.json \
-    - < instructions.txt >events.jsonl 2>codex.stderr &
-  codex_pid=$!
-  printf '%s\n' "$codex_pid" > codex.pid
-  (
-    waited=0
-    while [ "$waited" -lt "$timeout_secs" ]; do
-      kill -0 "$codex_pid" 2>/dev/null || exit 0
-      sleep 1
-      waited=$((waited + 1))
-    done
-    kill -0 "$codex_pid" 2>/dev/null || exit 0
-    : > timed-out
-    kill -TERM "$codex_pid" 2>/dev/null
-    waited=0
-    while [ "$waited" -lt 5 ]; do
-      kill -0 "$codex_pid" 2>/dev/null || exit 0
-      sleep 1
-      waited=$((waited + 1))
-    done
-    kill -KILL "$codex_pid" 2>/dev/null
-  ) >/dev/null 2>&1 &
-  watchdog_pid=$!
-  printf '%s\n' "$watchdog_pid" > watchdog.pid
-  wait "$codex_pid"
-  run_status=$?
-  kill -TERM "$watchdog_pid" 2>/dev/null
-  exit "$run_status"
-) &
-run_pid=$!
-wait "$run_pid" || codex_status=$?
-run_pid=
-rm -f "$codex_pid_file" "$watchdog_pid_file"
+remaining_secs=$((timeout_secs - (SECONDS - started_at)))
+if [ "$remaining_secs" -le 0 ]; then
+  : > "$work_dir/timed-out"
+  codex_status=124
+else
+  run_supervised "$remaining_secs" exec || codex_status=$?
+  if [ "$codex_status" -eq 124 ]; then
+    : > "$work_dir/timed-out"
+  fi
+fi
 
 python3 - "$work_dir/receipt.json" "$work_dir/events.jsonl" "$work_dir/payload.json" "$work_dir/missing.txt" "$work_dir" <<'PY'
 import json
@@ -483,12 +513,13 @@ print(json.dumps({
 PY
 verdict=$?
 
+if [ -e "$work_dir/timed-out" ] || [ "$codex_status" -gt 128 ]; then
+  fail "the OpenBrain memorize run was forcibly terminated after Codex began executing; a capture_thought result may not have been flushed before the kill, so the memory may already exist; do not retry automatically" 4
+fi
+
 case "$verdict" in
   0) ;;
   3)
-    if [ -e "$work_dir/timed-out" ] || [ "$codex_status" -gt 128 ]; then
-      fail "the OpenBrain memorize run was forcibly terminated after Codex began executing and recorded no completed write; a capture_thought result may not have been flushed before the kill, so the memory may already exist; do not retry automatically" 4
-    fi
     if [ "$codex_status" -ne 0 ]; then
       fail "Codex could not complete the OpenBrain memorize run and attempted no write; nothing was saved and it is safe to retry" 3
     fi
