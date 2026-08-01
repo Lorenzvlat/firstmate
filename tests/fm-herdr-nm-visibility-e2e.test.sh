@@ -92,6 +92,15 @@ HERDR_CONFIG_PATH="$SIDEBAR_CONFIG" "$HERDR_LAB_HELPER" run "$SESSION" config ch
   || fail "Herdr rejected the documented Firstmate Pi sidebar rows"
 pass "real Herdr lab: Herdr accepts the Pi sidebar layout that makes the task-specific agent name prominent"
 
+fm_backend_herdr_pi_prominence_live_verify "$SESSION" >/dev/null 2>&1
+LIVE_STATUS=$?
+[ "$LIVE_STATUS" = 3 ] || fail "headless Herdr session claimed live sidebar prominence (status=$LIVE_STATUS)"
+[ "$FM_BACKEND_HERDR_PI_PROMINENCE_LIVE_STATE" = unavailable ] \
+  || fail "headless Herdr session did not publish unavailable live-layout state"
+[ "$FM_BACKEND_HERDR_PI_PROMINENCE_LIVE_REASON" = live-sidebar-layout-read-unsupported ] \
+  || fail "unexpected live-layout refusal reason: $FM_BACKEND_HERDR_PI_PROMINENCE_LIVE_REASON"
+pass "real Herdr lab: config acceptance alone cannot claim live task-name-first sidebar presentation"
+
 WORKTREE="$TMP_ROOT/worktree"
 STATE_DIR="$TMP_ROOT/state"
 FAKEBIN="$TMP_ROOT/fakebin"

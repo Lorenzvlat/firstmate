@@ -132,7 +132,7 @@ The suite also covers lost or failed move responses, active-tab refusal, restart
 
 ### Pi worker identity and No Mistakes activity
 
-The guarded named-session suite ran on 2026-07-22 against Herdr 0.7.4 protocol 16:
+The guarded named-session suite ran on 2026-07-31 against Herdr 0.7.4 protocol 16:
 
 ```sh
 HERDR_LAB_HELPER=bin/fm-herdr-lab.sh \
@@ -144,16 +144,18 @@ Observed output:
 ```text
 ok - real Herdr lab: task-specific Pi names are distinct while both owners remain native Pi agents in one shared workspace
 ok - real Herdr lab: Herdr accepts the Pi sidebar layout that makes the task-specific agent name prominent
+ok - real Herdr lab: config acceptance alone cannot claim live task-name-first sidebar presentation
 ok - real Herdr lab: owning Pi row exposes bounded reviewer role/state/phase/elapsed/activity without a child agent
 ok - real Herdr lab: completed activity cleans up deterministically and leaves the named owner intact
 ok - real Herdr lab: source TTL removes abandoned activity without removing the task-specific owner name
 ok - real Herdr lab validation completed on Herdr 0.7.4 protocol 16
 ```
 
-The accepted row layout and live AgentInfo values resolved visually as a task-specific first row such as `Pi · firstmate/review-a [w1:p2] · fm-review-a`, followed by state and No Mistakes summary text while activity existed.
-Two such rows retained different names and pane ids inside one exact `firstmate` workspace, and terminal cleanup restored the underlying task name rather than the generic `pi` label.
-`herdr api schema --json` exposed `pane.report_metadata` with title, display-agent, state-label, token, and TTL fields, but no nested-agent field or relationship.
+The accepted row layout and live AgentInfo values prove the required configuration and unique task identity independently, but they do not prove that an already-running TUI applied the row.
+Two agents retained different names and pane ids inside one exact `firstmate` workspace, and terminal cleanup restored the underlying task name rather than the generic `pi` label.
+`herdr api schema --json` exposed `pane.report_metadata` with title, display-agent, state-label, token, and TTL fields, but no nested-agent field, child-agent relationship, or live TUI sidebar-layout read.
 `agent rename` returned the unchanged canonical `agent: pi` plus the new task-specific `name`, and Herdr rejected a duplicate name with `agent_name_taken`.
+The strict live-boundary regression therefore rejects the headless 0.7.4 session as unavailable even after `config check` succeeds, and spawn remediation never reloads or restarts Herdr automatically.
 
 The focused privacy, attribution, capability-fallback, lifecycle, and cleanup regressions are:
 

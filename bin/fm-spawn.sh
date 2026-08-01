@@ -817,16 +817,6 @@ BRIEF_REAL="$BRIEF_DIR_REAL/$(basename "$BRIEF")"
 # (docs/herdr-backend.md "Known gaps").
 PROJ_ABS_REAL=$(cd "$PROJ_ABS" 2>/dev/null && pwd -P) || PROJ_ABS_REAL="$PROJ_ABS"
 
-if [ "$BACKEND" = herdr ] && [ "$HARNESS" = pi ] \
-   && ! fm_backend_herdr_pi_prominent_configured; then
-  HERDR_PI_CONFIG=$(fm_backend_herdr_pi_prominent_config_path 2>/dev/null || printf '<Herdr config.toml>')
-  echo "error: Herdr-backed Pi spawn requires a verified prominent task identity; add the following to $HERDR_PI_CONFIG and retry:" >&2
-  echo '[ui.sidebar.agents.rows_by_agent]' >&2
-  # shellcheck disable=SC2016 # The dollar-prefixed field is literal Herdr configuration.
-  echo 'pi = [["state_icon", "agent", "tab"], ["state_text", "$nm_summary"]]' >&2
-  exit 1
-fi
-
 real_path_or_raw() {  # <path>
   local path=$1 real
   if real=$(cd "$path" 2>/dev/null && pwd -P); then
@@ -953,6 +943,28 @@ case "$BACKEND" in
     WT_TARGET="$WID"
     ;;
   herdr)
+    HERDR_SES=$(fm_backend_herdr_session)
+    if [ "$HARNESS" = pi ]; then
+      if ! fm_backend_herdr_pi_prominent_configured; then
+        HERDR_PI_CONFIG=$(fm_backend_herdr_pi_prominent_config_path 2>/dev/null || printf '<Herdr config.toml>')
+        echo "error: Herdr-backed Pi spawn requires a verified prominent task identity; add the following to $HERDR_PI_CONFIG:" >&2
+        echo '[ui.sidebar.agents.rows_by_agent]' >&2
+        # shellcheck disable=SC2016 # The dollar-prefixed field is literal Herdr configuration.
+        echo 'pi = [["state_icon", "agent", "tab"], ["state_text", "$nm_summary"]]' >&2
+        fm_backend_herdr_pi_prominence_remediation "$HERDR_SES" config-invalid
+        exit 1
+      fi
+      fm_backend_herdr_server_ensure "$HERDR_SES" || {
+        echo "error: Herdr-backed Pi spawn could not inspect the running session; refusing before task creation" >&2
+        fm_backend_herdr_pi_prominence_remediation "$HERDR_SES" unavailable
+        exit 1
+      }
+      if ! fm_backend_herdr_pi_prominence_live_verify "$HERDR_SES"; then
+        fm_backend_herdr_pi_prominence_remediation \
+          "$HERDR_SES" "$FM_BACKEND_HERDR_PI_PROMINENCE_LIVE_STATE"
+        exit 1
+      fi
+    fi
     # fm_backend_herdr_workspace_label resolves the target workspace from
     # FM_HOME. For every KIND except secondmate, this process's own FM_HOME is
     # already the right home (the primary spawning its own crewmate/scout, or
@@ -971,7 +983,6 @@ case "$BACKEND" in
     HERDR_PRESENTATION_JOURNAL=$(fm_backend_herdr_projection_journal_path "$STATE" "$ID")
     HERDR_PROJECTED=0
     if [ "$KIND" != secondmate ] && [ -f "$CONFIG/herdr-presentation-spaces" ]; then
-      HERDR_SES=$(fm_backend_herdr_session)
       HERDR_PARENT_LABEL=$(FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_workspace_label)
       if [ -e "$HERDR_PRESENTATION_JOURNAL" ] || [ -L "$HERDR_PRESENTATION_JOURNAL" ]; then
         fm_backend_herdr_server_ensure "$HERDR_SES" || {
@@ -1530,10 +1541,18 @@ if [ "$HARNESS" = kimi ]; then
   fi
 fi
 if [ "$BACKEND" = herdr ] && [ "$HARNESS" = pi ]; then
+  HERDR_PI_FAILURE=
   HERDR_PI_OWNER=$(FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_workspace_label)
   if ! HERDR_PI_NAME=$(fm_backend_herdr_pi_worker_name "$HERDR_PI_OWNER" "$ID" "$KIND" "$HERDR_PANE_ID") \
      || ! fm_backend_herdr_name_pi_worker "$T" "$HERDR_PI_NAME"; then
-    echo "error: Herdr could not verify a unique task-specific Pi identity for $ID; closing only the failed task pane" >&2
+    HERDR_PI_FAILURE='unique task-specific Pi identity'
+  elif ! fm_backend_herdr_pi_prominence_live_verify "$HERDR_SES"; then
+    HERDR_PI_FAILURE='live task-name-first Pi presentation'
+    fm_backend_herdr_pi_prominence_remediation \
+      "$HERDR_SES" "$FM_BACKEND_HERDR_PI_PROMINENCE_LIVE_STATE"
+  fi
+  if [ -n "$HERDR_PI_FAILURE" ]; then
+    echo "error: Herdr could not verify $HERDR_PI_FAILURE for $ID; closing only the failed task pane" >&2
     if spawn_herdr_presentation_order_lock_acquire "$HERDR_SES"; then
       if fm_backend_herdr_projection_close_pane_focus_preserving "$HERDR_SES" "$HERDR_PANE_ID"; then
         if [ "$(fm_backend_herdr_pane_agent_state "$HERDR_SES" "$HERDR_PANE_ID")" = dead ]; then

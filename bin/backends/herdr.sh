@@ -149,6 +149,91 @@ fm_backend_herdr_pi_prominent_configured() {
   ' "$config"
 }
 
+# fm_backend_herdr_pi_prominence_live_probe: report whether the RUNNING Herdr
+# client can prove its effective Pi sidebar row, independently of config.toml.
+# Output is one allowlisted state and reason separated by a tab:
+#   applied<TAB><reason>      exact task-name-first row is live
+#   stale<TAB><reason>        live row is known but does not match config
+#   unavailable<TAB><reason>  no exact live-client read is available
+# Herdr 0.7.4 protocol 16 has server.reload_config and window-title client
+# methods, but no live TUI sidebar-layout read, so it can never claim applied.
+# A future adapter may return applied only from an exact live-client response;
+# disk config, a server reload response, and a successful agent rename are not
+# sufficient. Tests override this narrow probe to exercise all three states.
+fm_backend_herdr_pi_prominence_live_probe() { # <session>
+  local session=$1 status schema
+  status=$(fm_backend_herdr_cli "$session" status --json 2>/dev/null) || {
+    printf 'unavailable\tlive-session-status-unreadable\n'
+    return 0
+  }
+  if ! printf '%s' "$status" | jq -e --arg session "$session" '
+    .server.running == true
+    and .server.compatible == true
+    and .server.session == $session
+    and .client.session == $session
+  ' >/dev/null 2>&1; then
+    printf 'unavailable\tlive-session-status-unverified\n'
+    return 0
+  fi
+  schema=$(fm_backend_herdr_cli "$session" api schema --json 2>/dev/null) || {
+    printf 'unavailable\tlive-api-schema-unreadable\n'
+    return 0
+  }
+  if ! printf '%s' "$schema" | jq -e '
+    [.schemas.request.oneOf[]?.properties.method.const]
+    | type == "array"
+  ' >/dev/null 2>&1; then
+    printf 'unavailable\tlive-api-schema-unverified\n'
+    return 0
+  fi
+  printf 'unavailable\tlive-sidebar-layout-read-unsupported\n'
+}
+
+fm_backend_herdr_pi_prominence_live_verify() { # <session>
+  local result state reason
+  FM_BACKEND_HERDR_PI_PROMINENCE_LIVE_STATE=unavailable
+  FM_BACKEND_HERDR_PI_PROMINENCE_LIVE_REASON=invalid-live-proof
+  result=$(fm_backend_herdr_pi_prominence_live_probe "$1") || return 3
+  state=${result%%$'\t'*}
+  reason=${result#*$'\t'}
+  [ "$reason" != "$result" ] || reason=missing-live-proof-reason
+  case "$state" in
+    applied)
+      FM_BACKEND_HERDR_PI_PROMINENCE_LIVE_STATE=applied
+      FM_BACKEND_HERDR_PI_PROMINENCE_LIVE_REASON=$reason
+      return 0
+      ;;
+    stale)
+      FM_BACKEND_HERDR_PI_PROMINENCE_LIVE_STATE=stale
+      FM_BACKEND_HERDR_PI_PROMINENCE_LIVE_REASON=$reason
+      return 2
+      ;;
+    unavailable)
+      # shellcheck disable=SC2034 # Read by fm-spawn after this verifier returns.
+      FM_BACKEND_HERDR_PI_PROMINENCE_LIVE_STATE=unavailable
+      # shellcheck disable=SC2034 # Diagnostic reason is consumed by focused callers and tests.
+      FM_BACKEND_HERDR_PI_PROMINENCE_LIVE_REASON=$reason
+      return 3
+      ;;
+  esac
+  return 3
+}
+
+# Remediation is guidance only. Firstmate never invokes Herdr reload, stop, or
+# restart operations while accepting or rejecting a worker spawn.
+fm_backend_herdr_pi_prominence_remediation() { # <session> <state>
+  local session=$1 state=$2 config
+  config=$(fm_backend_herdr_pi_prominent_config_path 2>/dev/null || printf '<Herdr config.toml>')
+  printf 'error: running Herdr session %s has Pi prominence state %s; refusing spawn because disk config alone is not live proof\n' "$session" "$state" >&2
+  printf 'remediation: validate %s, then wait until the entire Firstmate fleet using session %s is idle\n' "$config" "$session" >&2
+  if [ "$state" = unavailable ]; then
+    printf 'remediation: use a Herdr release that exposes exact live sidebar-layout verification; then perform one planned Herdr TUI reload or restart and retry\n' >&2
+  else
+    printf 'remediation: perform one planned Herdr TUI reload or restart and retry so the live task-name-first Pi row can be verified\n' >&2
+  fi
+  printf 'remediation: Firstmate will never reload or restart Herdr automatically\n' >&2
+}
+
 # fm_backend_herdr_workspace_label: the per-firstmate-HOME herdr workspace
 # label (docs/herdr-backend.md "Default task container shape"). The PRIMARY home (no
 # secondmate marker) resolves to the constant "firstmate", byte-identical to

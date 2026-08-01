@@ -421,6 +421,46 @@ test_pi_prominence_requires_exact_valid_config() {
   pass "Herdr Pi prominence requires the exact validated sidebar row"
 }
 
+test_pi_prominence_requires_live_applied_state() (
+  local status output backend_source
+  FM_FAKE_PI_LIVE_STATE=applied
+  # shellcheck disable=SC2329 # Invoked indirectly by the sourced live verifier.
+  fm_backend_herdr_pi_prominence_live_probe() {
+    printf '%s\tunit-proof\n' "$FM_FAKE_PI_LIVE_STATE"
+  }
+
+  fm_backend_herdr_pi_prominence_live_verify fmtest \
+    || fail "an exact live-applied proof was rejected"
+  [ "$FM_BACKEND_HERDR_PI_PROMINENCE_LIVE_STATE" = applied ] \
+    || fail "live-applied proof did not publish applied state"
+
+  FM_FAKE_PI_LIVE_STATE=stale
+  fm_backend_herdr_pi_prominence_live_verify fmtest >/dev/null 2>&1
+  status=$?
+  [ "$status" = 2 ] || fail "stale live presentation returned $status instead of 2"
+  [ "$FM_BACKEND_HERDR_PI_PROMINENCE_LIVE_STATE" = stale ] \
+    || fail "stale live proof did not publish stale state"
+
+  FM_FAKE_PI_LIVE_STATE=unavailable
+  fm_backend_herdr_pi_prominence_live_verify fmtest >/dev/null 2>&1
+  status=$?
+  [ "$status" = 3 ] || fail "unavailable live presentation returned $status instead of 3"
+  [ "$FM_BACKEND_HERDR_PI_PROMINENCE_LIVE_STATE" = unavailable ] \
+    || fail "unavailable live proof did not publish unavailable state"
+
+  HERDR_CONFIG_PATH="$TMP_ROOT/herdr-config.toml"
+  export HERDR_CONFIG_PATH
+  output=$(fm_backend_herdr_pi_prominence_remediation fmtest stale 2>&1)
+  assert_contains "$output" 'entire Firstmate fleet using session fmtest is idle' "remediation omitted the idle-fleet boundary"
+  assert_contains "$output" 'planned Herdr TUI reload or restart' "remediation omitted the deliberate operator action"
+  assert_contains "$output" 'Firstmate will never reload or restart Herdr automatically' "remediation did not forbid automatic lifecycle control"
+
+  backend_source=$(cat "$ROOT/bin/backends/herdr.sh")
+  assert_not_contains "$backend_source" 'fm_backend_herdr_cli "$session" server reload-config' "live proof automatically reloads Herdr"
+  assert_not_contains "$backend_source" 'fm_backend_herdr_cli "$session" server stop' "live proof automatically stops Herdr"
+  pass "Herdr Pi prominence requires live-applied proof and fails stale or unavailable states with idle-fleet remediation"
+)
+
 test_pi_worker_name_refuses_non_pi_identity() {
   local name calls status
   reset_case
@@ -443,11 +483,15 @@ test_spawn_applies_pi_name_after_launch_only_on_herdr() {
   local source enter_line condition_line rename_line success_line
   source=$(cat "$ROOT/bin/fm-spawn.sh")
   assert_contains "$source" 'if [ "$BACKEND" = herdr ] && [ "$HARNESS" = pi ]; then' "spawn lost the Herdr+Pi-only naming condition"
-  assert_contains "$source" 'fm_backend_herdr_pi_prominent_configured' "spawn does not preflight the prominent Pi presentation"
+  assert_contains "$source" 'fm_backend_herdr_pi_prominent_configured' "spawn does not preflight the prominent Pi presentation config"
+  [ "$(grep -c 'fm_backend_herdr_pi_prominence_live_verify' "$ROOT/bin/fm-spawn.sh")" -eq 2 ] \
+    || fail "spawn does not verify live Pi prominence before creation and after rename"
   assert_contains "$source" 'fm_backend_herdr_projection_close_pane_focus_preserving "$HERDR_SES" "$HERDR_PANE_ID"' "failed Pi identity does not clean up only its exact pane"
   assert_contains "$source" 'fm_backend_herdr_pane_agent_state "$HERDR_SES" "$HERDR_PANE_ID"' "failed Pi identity does not verify exact pane closure"
   assert_contains "$source" 'fm_spawn_identity_rollback' "failed Pi identity bypasses complete spawn rollback"
-  assert_contains "$source" 'add the following to $HERDR_PI_CONFIG and retry' "missing Pi presentation config lacks remediation"
+  assert_contains "$source" 'add the following to $HERDR_PI_CONFIG' "missing Pi presentation config lacks exact configuration remediation"
+  assert_contains "$source" 'fm_backend_herdr_pi_prominence_remediation' "spawn does not provide live-state remediation"
+  assert_not_contains "$source" 'server reload-config' "spawn automatically reloads Herdr"
   enter_line=$(grep -nF 'spawn_send_key "$T" Enter' "$ROOT/bin/fm-spawn.sh" | tail -1 | cut -d: -f1)
   condition_line=$(grep -nF 'if [ "$BACKEND" = herdr ] && [ "$HARNESS" = pi ]; then' "$ROOT/bin/fm-spawn.sh" | tail -1 | cut -d: -f1)
   rename_line=$(grep -nF 'fm_backend_herdr_name_pi_worker "$T" "$HERDR_PI_NAME"' "$ROOT/bin/fm-spawn.sh" | tail -1 | cut -d: -f1)
@@ -701,6 +745,7 @@ test_non_herdr_backend_is_unchanged
 test_pi_worker_name_is_unique_and_verified
 test_pi_worker_name_refuses_non_pi_identity
 test_pi_prominence_requires_exact_valid_config
+test_pi_prominence_requires_live_applied_state
 test_spawn_applies_pi_name_after_launch_only_on_herdr
 test_pi_identity_rollback_restores_metadata_on_failure
 test_secondmate_pi_identity_rollback_preserves_home
