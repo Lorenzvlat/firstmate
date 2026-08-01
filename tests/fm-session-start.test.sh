@@ -980,7 +980,7 @@ EOF
   pass "session start: the proven bare-shell recovery path remains intact"
 }
 
-test_session_start_relaunches_herdr_husk_secondmate() {
+test_session_start_refuses_herdr_husk_relaunch_without_live_layout_proof() {
   local rec root home fakebin mate log state out
   rec=$(prepare_session_start_herdr_secondmate secondmate-herdr-husk)
   IFS='|' read -r root home fakebin mate log state <<EOF
@@ -989,14 +989,18 @@ EOF
 
   out=$(run_session_start_herdr_secondmate "$root" "$home" "$fakebin" "$mate" "$log" "$state")
 
-  assert_not_contains "$out" "SECONDMATE_LIVENESS:" "successful Herdr husk recovery should stay non-actionable"
+  assert_contains "$out" "SECONDMATE_LIVENESS:" \
+    "unsupported live Herdr layout verification should keep the failed recovery actionable"
   assert_contains "$(cat "$log")" "pane close p-old" "session start did not close the confirmed Herdr husk"
-  assert_contains "$(cat "$log")" "tab create" "session start did not relaunch the Herdr secondmate"
-  assert_contains "$out" "endpoint: alive (backend=herdr window=default:p-new)" \
-    "the later fleet read did not confirm the relaunched Herdr endpoint"
-  assert_grep 'herdr_pane_id=p-new' "$home/state/$SESSION_START_HERDR_SECOND_MATE_ID.meta" \
-    "the real respawn path did not record the replacement Herdr pane"
-  pass "session start: a confirmed Herdr husk is closed and relaunched"
+  assert_not_contains "$(cat "$log")" "tab create" \
+    "session start created a replacement despite unavailable live layout verification"
+  assert_not_contains "$(cat "$log")" "agent rename" \
+    "session start renamed an agent despite refusing the replacement before spawn"
+  assert_contains "$out" "endpoint: dead (backend=herdr window=default:p-old)" \
+    "the later fleet read did not retain the original endpoint after refusing the replacement"
+  assert_grep 'herdr_pane_id=p-old' "$home/state/$SESSION_START_HERDR_SECOND_MATE_ID.meta" \
+    "the refused recovery did not restore the original Herdr metadata"
+  pass "session start: a confirmed Herdr husk recovery refuses unsupported live layout proof"
 }
 
 # --- endpoint liveness: tmux and herdr, live and dead ------------------------
@@ -1379,7 +1383,7 @@ test_session_start_relaunches_missing_pi_secondmate
 test_session_start_preserves_ambiguous_pi_process
 test_session_start_preserves_transiently_unreadable_tmux
 test_session_start_preserves_proven_bare_shell_recovery
-test_session_start_relaunches_herdr_husk_secondmate
+test_session_start_refuses_herdr_husk_relaunch_without_live_layout_proof
 test_status_tail_bounding
 test_orphan_status_logs_are_printed
 test_endpoint_liveness_tmux
