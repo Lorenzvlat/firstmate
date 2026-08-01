@@ -100,14 +100,29 @@ cleanup() {
   rm -rf "$work_dir"
 }
 terminate_run() {
-  local waited=0
-  [ -n "$run_pid" ] || return 0
-  kill -TERM "$run_pid" 2>/dev/null
-  while kill -0 "$run_pid" 2>/dev/null && [ "$waited" -lt 30 ]; do
+  local pid pids waited=0 alive
+  pids=$run_pid
+  if [ -z "$pids" ]; then
+    pids=$(jobs -pr)
+  fi
+  [ -n "$pids" ] || return 0
+  for pid in $pids; do
+    kill -TERM "$pid" 2>/dev/null
+  done
+  while [ "$waited" -lt 30 ]; do
+    alive=
+    for pid in $pids; do
+      if kill -0 "$pid" 2>/dev/null; then
+        alive=1
+      fi
+    done
+    [ -n "$alive" ] || return 0
     sleep 0.1
     waited=$((waited + 1))
   done
-  kill -KILL "$run_pid" 2>/dev/null
+  for pid in $pids; do
+    kill -KILL "$pid" 2>/dev/null
+  done
 }
 interrupted() {
   terminate_run
@@ -198,6 +213,12 @@ chmod 600 "$work_dir/supervise.py" || fail "could not protect the Codex supervis
 run_supervised() {
   local status=0
   python3 "$work_dir/supervise.py" "$work_dir" "$1" "$2" &
+  if [ "${FM_MEMORIZE_TEST_HOLD_SUPERVISOR_REGISTRATION:-}" = 1 ]; then
+    : > "$work_dir/supervisor-registration-held"
+    while [ ! -e "$work_dir/supervisor-registration-release" ]; do
+      sleep 0.05
+    done
+  fi
   run_pid=$!
   wait "$run_pid" || status=$?
   run_pid=
@@ -281,10 +302,12 @@ On any configuration, authentication, tool, or write failure, return success=fal
 EOF
 
 codex_status=0
+if [ -n "${FM_MEMORIZE_TEST_POST_DISCOVERY_DELAY:-}" ]; then
+  sleep "$FM_MEMORIZE_TEST_POST_DISCOVERY_DELAY"
+fi
 remaining_secs=$((timeout_secs - (SECONDS - started_at)))
 if [ "$remaining_secs" -le 0 ]; then
-  : > "$work_dir/timed-out"
-  codex_status=124
+  fail "the memorize deadline expired after MCP discovery but before Codex could begin an OpenBrain write; nothing was saved and it is safe to retry" 3
 else
   run_supervised "$remaining_secs" exec || codex_status=$?
   if [ "$codex_status" -eq 124 ]; then

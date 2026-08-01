@@ -429,6 +429,50 @@ test_mcp_discovery_is_bounded_before_any_write() {
   pass "memorize bounds MCP discovery before any OpenBrain write"
 }
 
+test_deadline_after_discovery_is_a_confirmed_no_write() {
+  local dir="$TMP_ROOT/discovery-deadline" fakebin output code
+  fakebin=$(make_fixture discovery-deadline)
+  set +e
+  output=$(FM_MEMORIZE_TIMEOUT_SECONDS=2 FM_MEMORIZE_TEST_POST_DISCOVERY_DELAY=3 \
+    run_helper "$dir" "$fakebin" 2>&1)
+  code=$?
+  set -e
+  expect_code 3 "$code" "deadline exhausted after MCP discovery"
+  assert_contains "$output" 'before Codex could begin' "pre-write deadline was not classified before execution"
+  assert_contains "$output" 'safe to retry' "pre-write deadline was not reported as retryable"
+  [ ! -e "$dir/cwd" ] || fail "Codex write ran after discovery exhausted the deadline"
+  pass "memorize classifies a post-discovery deadline as no write"
+}
+
+test_signal_before_supervisor_pid_assignment_stops_the_job() {
+  local dir="$TMP_ROOT/outer-spawn-signal" fakebin pid code work waited=0
+  fakebin=$(make_fixture outer-spawn-signal)
+  PATH="$fakebin:/usr/bin:/bin" CAPTURE_DIR="$dir" OPENBRAIN_KEY='test-secret-value' \
+    FAKE_MCP_MODE=hang FM_MEMORIZE_TIMEOUT_SECONDS=120 \
+    FM_MEMORIZE_TEST_HOLD_SUPERVISOR_REGISTRATION=1 \
+    "$MEMORIZE" --title-file "$dir/title.txt" --body-file "$dir/body.txt" \
+    >"$dir/out" 2>"$dir/error" &
+  pid=$!
+  while [ ! -s "$dir/mcp-cwd" ] && [ "$waited" -lt 100 ]; do
+    sleep 0.1
+    waited=$((waited + 1))
+  done
+  [ -s "$dir/mcp-cwd" ] || fail "the outer-spawn fixture never started MCP discovery"
+  work=$(cat "$dir/mcp-cwd")
+  [ -e "$work/supervisor-registration-held" ] || fail "the supervisor registration window was not held"
+  kill -TERM "$pid" 2>/dev/null || fail "could not signal the supervisor registration window"
+  set +e
+  wait "$pid"
+  code=$?
+  set -e
+  expect_code 143 "$code" "SIGTERM before supervisor PID assignment"
+  [ ! -e "$work" ] || fail "outer-spawn interruption left its workspace behind: $work"
+  [ ! -e "$dir/cwd" ] || fail "Codex exec ran after outer-spawn interruption"
+  assert_contains "$(cat "$dir/error")" 'do not retry automatically' \
+    "outer-spawn interruption did not warn against an automatic retry"
+  pass "memorize owns the supervisor throughout outer spawn registration"
+}
+
 test_signal_during_exec_spawn_stops_the_owned_process_group() {
   local dir="$TMP_ROOT/spawn-signal" fakebin pid codex_pid code waited=0
   fakebin=$(make_fixture spawn-signal)
@@ -548,6 +592,8 @@ test_completed_write_without_full_openbrain_detail_is_uncertain_not_retryable
 test_proven_absence_of_a_write_stays_retryable
 test_watchdog_timeout_after_execution_is_unconfirmed_not_retryable
 test_mcp_discovery_is_bounded_before_any_write
+test_deadline_after_discovery_is_a_confirmed_no_write
+test_signal_before_supervisor_pid_assignment_stops_the_job
 test_signal_during_exec_spawn_stops_the_owned_process_group
 test_unrecognized_read_tool_does_not_shadow_the_one_write
 test_interrupting_signal_stops_the_run_and_cleans_up
