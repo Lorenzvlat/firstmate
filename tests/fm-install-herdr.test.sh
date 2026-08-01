@@ -8,11 +8,13 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 HERDR_INSTALL="$ROOT/bin/fm-install-herdr.sh"
+HERDR_VERSION_OWNER="$ROOT/bin/fm-herdr-version.sh"
 TREEHOUSE_INSTALL="$ROOT/bin/fm-install-treehouse.sh"
 CLEANUP="$ROOT/bin/fm-herdr-ci-cleanup.sh"
 CI="$ROOT/.github/workflows/ci.yml"
 
 assert_present "$HERDR_INSTALL" "bin/fm-install-herdr.sh is missing"
+assert_present "$HERDR_VERSION_OWNER" "bin/fm-herdr-version.sh is missing"
 assert_present "$TREEHOUSE_INSTALL" "bin/fm-install-treehouse.sh is missing"
 assert_present "$CLEANUP" "bin/fm-herdr-ci-cleanup.sh is missing"
 [ -x "$HERDR_INSTALL" ] || fail "fm-install-herdr.sh must be executable"
@@ -20,8 +22,10 @@ assert_present "$CLEANUP" "bin/fm-herdr-ci-cleanup.sh is missing"
 [ -x "$CLEANUP" ] || fail "fm-herdr-ci-cleanup.sh must be executable"
 
 test_herdr_installer_pins_exact_version_and_checksums() {
-  assert_grep 'FM_HERDR_CI_VERSION=0.7.4' "$HERDR_INSTALL" \
-    "Herdr installer must pin suite-verified 0.7.4"
+  assert_grep 'FM_HERDR_CI_VERSION=0.7.4' "$HERDR_VERSION_OWNER" \
+    "Herdr version owner must pin suite-verified 0.7.4"
+  assert_grep 'fm-herdr-version.sh' "$HERDR_INSTALL" \
+    "Herdr installer must consume the shared version owner"
   assert_grep 'FM_HERDR_CI_MIN_PROTOCOL=16' "$HERDR_INSTALL" \
     "Herdr installer must require protocol floor 16"
   assert_grep 'ogulcancelik/herdr' "$HERDR_INSTALL" \

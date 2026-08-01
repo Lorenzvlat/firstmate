@@ -62,6 +62,8 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 . "$SCRIPT_DIR/fm-backend.sh"
 # shellcheck source=bin/fm-classify-lib.sh
 . "$SCRIPT_DIR/fm-classify-lib.sh"
+# shellcheck source=bin/fm-nm-status-lib.sh
+. "$SCRIPT_DIR/fm-nm-status-lib.sh"
 
 ID=${1:-}
 [ -n "$ID" ] || { echo "usage: fm-crew-state.sh <id>" >&2; exit 2; }
@@ -194,18 +196,10 @@ crew_pane_is_busy() {  # <target>
 # --- no-mistakes run lookup (authoritative when a run matches this branch) --
 
 trim() {
-  local s=${1:-}
-  s="${s#"${s%%[![:space:]]*}"}"
-  s="${s%"${s##*[![:space:]]}"}"
-  printf '%s' "$s"
+  fm_nm_status_trim "${1:-}"
 }
 strip_quotes() {
-  local s
-  s=$(trim "${1:-}")
-  case "$s" in
-    \"*\") s=${s#\"}; s=${s%\"} ;;
-  esac
-  trim "$s"
+  fm_nm_status_strip_quotes "${1:-}"
 }
 
 # Bounded no-mistakes call in the worktree; stdout only, never fails the script.
@@ -226,7 +220,8 @@ nm_run() {  # <args...>
 # Scalar value of a TOON key in the captured run output ($RUN_OUT).
 RUN_OUT=""
 nm_field() {  # <key>
-  printf '%s\n' "$RUN_OUT" | sed -n "s/^[[:space:]]*$1:[[:space:]]*\(.*\)/\1/p" | head -1
+  FM_NM_STATUS_OUT=$RUN_OUT
+  fm_nm_status_field "$1"
 }
 # Finding count from a findings[N]{...} table header; empty when none.
 nm_findings_count() {
@@ -294,12 +289,11 @@ log_reports_ci_ready() {
 }
 
 nm_ci_step_status() {
-  local row rest
-  row=$(printf '%s\n' "$RUN_OUT" | grep -E '^[[:space:]]*ci,[[:space:]]*"?(running|fixing)"?[[:space:]]*,' | head -1)
-  [ -n "$row" ] || return 0
-  row=$(trim "$row")
-  rest=${row#*,}
-  strip_quotes "$(trim "${rest%%,*}")"
+  FM_NM_STATUS_OUT=$RUN_OUT
+  fm_nm_status_parse_step ci
+  case "$FM_NM_STATUS_STEP_STATUS" in
+    running|fixing) printf '%s' "$FM_NM_STATUS_STEP_STATUS" ;;
+  esac
 }
 
 nm_effective_ci_step_status() {
@@ -419,31 +413,16 @@ CREW_BRANCH=$(git -C "$WT" symbolic-ref --quiet --short HEAD 2>/dev/null || true
 #     advanced outside the run)
 #   - diverged / run head not in this worktree: no match (rewritten branch tip)
 nm_run_head_matches_worktree() {
-  local run_head local_full run_full
+  local run_head
   run_head=$(strip_quotes "$(nm_field head)")
-  [ -n "$run_head" ] || return 1
-  local_full=$(git -C "$WT" rev-parse HEAD 2>/dev/null) || return 1
-  run_full=$(git -C "$WT" rev-parse --verify "${run_head}^{commit}" 2>/dev/null) || return 1
-  [ "$run_full" = "$local_full" ] && return 0
-  if git -C "$WT" merge-base --is-ancestor "$local_full" "$run_full" 2>/dev/null; then
-    return 0
-  fi
-  return 1
+  fm_nm_run_head_matches "$WT" "$run_head"
 }
 
 # Coarse runs-list rows are "<status> <branch> <short-sha> ...". 0 if the short
 # sha for this branch row matches the worktree head under the same rules as
 # nm_run_head_matches_worktree (equal, or local is ancestor of run tip).
 nm_coarse_head_matches_worktree() {  # <short-sha>
-  local run_head=$1 local_full run_full
-  [ -n "$run_head" ] || return 1
-  local_full=$(git -C "$WT" rev-parse HEAD 2>/dev/null) || return 1
-  run_full=$(git -C "$WT" rev-parse --verify "${run_head}^{commit}" 2>/dev/null) || return 1
-  [ "$run_full" = "$local_full" ] && return 0
-  if git -C "$WT" merge-base --is-ancestor "$local_full" "$run_full" 2>/dev/null; then
-    return 0
-  fi
-  return 1
+  fm_nm_run_head_matches "$WT" "$1"
 }
 
 HAVE_RUN=0

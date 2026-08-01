@@ -28,7 +28,7 @@ Spawn stops before creating a Herdr container or acquiring a task worktree when 
 No separate first-run provisioning is required.
 
 The required CI lane uses the pinned installers in `bin/fm-install-herdr.sh` and `bin/fm-install-treehouse.sh`.
-Those script headers own release assets, checksums, download bounds, and post-install gates.
+Those installers and their sourced version contracts own release assets, checksums, download bounds, and post-install gates.
 Real harness credential tests remain opt-in rather than part of default CI.
 
 ## Watching and task containers
@@ -52,6 +52,54 @@ An older secondmate workspace using `firstmate-<id>` is not migrated automatical
 Existing task operations use recorded endpoint ids and do not move a live task when labels change.
 The per-home workspace is reused while it has task tabs.
 Closing its last tab can remove the workspace, and the next spawn recreates it.
+
+## Firstmate worker identity and No Mistakes child activity
+
+Herdr 0.7.4's stock expanded agent row is `[["state_icon", "workspace", "tab"], ["agent"]]`.
+That is why several Pi workers in Firstmate's shared workspace all show the prominent label `firstmate`, a dim task tab on the right, and the generic `pi` label below.
+The protocol has no per-pane override for the built-in `workspace` token, and its schema has no nested-agent or child-agent relation.
+`agent.start` would create an independently interactive terminal, so Firstmate deliberately does not use it for No Mistakes visibility.
+
+Firstmate requires every new Herdr-backed Pi worker to receive a unique task-specific Herdr agent name after native Pi detection, such as `Pi · firstmate/review-a [w1:p2]`.
+The owner/task prefix is human-readable, and the response-derived pane suffix keeps the name distinct even if two homes sharing a session reuse an owner label and task id.
+Firstmate verifies `agent=pi` before calling `agent rename`, leaves that canonical identity unchanged, and never renames the shared workspace or the `fm-<id>` task tab.
+A shell or non-Pi agent is never renamed.
+Missing native registration, a conflicting name, a failed rename, or an unreadable verification response fails the spawn, closes only the exact failed task pane when focus-safe cleanup can be verified, and then runs the normal complete spawn rollback.
+An unconfirmed pane close or incomplete rollback retains the task metadata for deterministic teardown rather than discarding its ownership record.
+
+The task-specific Pi name must appear in the prominent first position rather than Herdr's shared workspace label.
+Add this supported Herdr sidebar override to the operator's normal Herdr config:
+
+```toml
+[ui.sidebar.agents.rows_by_agent]
+pi = [["state_icon", "agent", "tab"], ["state_text", "$nm_summary"]]
+```
+
+Firstmate never edits, reloads, or restarts the operator's Herdr config or TUI automatically.
+It validates the config file as a prerequisite but never treats disk config alone as proof of the running client's presentation.
+A Herdr-backed Pi spawn proceeds only when the adapter can also verify that the running session has applied the exact task-name-first Pi row, both before task creation and after the unique rename.
+Herdr 0.7.4 protocol 16 exposes no live TUI sidebar-layout read, so the current adapter refuses the spawn even when the config file is valid rather than silently accepting an unverified generic identity.
+The non-destructive remediation is to use a Herdr release with exact live sidebar-layout verification, wait until the entire Firstmate fleet using that session is idle, perform one planned Herdr TUI reload or restart, and retry the spawn.
+The override uses only Herdr's documented canonical `pi` row selector, built-in `agent` and `tab` values, and the custom metadata token `$nm_summary`.
+When no review is active, the optional custom token is elided and the second row still shows Pi's native state text.
+
+While the owning Herdr worker has an attributable active No Mistakes review or fix round, the watcher reports source-scoped `pane.report_metadata` on that worker's existing pane.
+The default sidebar's `agent` row becomes a bounded summary beginning with the task identity and including the child role, state, elapsed time, and last allowlisted structural activity.
+The recommended Pi row above keeps the same task identity prominent and adds the concise `$nm_summary` row.
+Tokens also expose `nm_role`, `nm_state`, `nm_phase`, `nm_elapsed`, and `nm_activity` for other supported custom layouts.
+Waiting for the captain, failure, timeout, and completion are distinct states.
+Completion, failure, and timeout are transient one-shot presentations, while active and waiting presentations use a renewable bounded TTL sized to cover the eligible-task refresh rotation.
+Herdr's TTL removes abandoned metadata on its own, and a later bounded refresh explicitly clears expired source metadata and retires its private non-authoritative cache.
+
+This surface is observational only.
+It creates no pane, agent, Firstmate task, dispatch target, or fleet record, and it has no send, focus, interrupt, kill, resume, or control action.
+No Mistakes remains the sole owner of child processes, run lifecycle, and structured output.
+Only strict run ids, fixed role/state/phase/activity values, and numeric elapsed time reach Herdr.
+Prompt text, findings, paths, credentials, environment values, command lines, pids, raw errors, agent prose, and raw log lines are never copied.
+If the exact `pane.report_metadata` schema is unavailable, the feature performs no No Mistakes query or Herdr mutation and existing task behavior remains unchanged.
+Non-Herdr tasks never enter this path.
+
+[`verification/runtime-backends.md`](verification/runtime-backends.md#pi-worker-identity-and-no-mistakes-activity) records the versioned schema, identity, layout, privacy, and cleanup evidence for this feature.
 
 ## Optional presentation spaces
 
@@ -278,6 +326,8 @@ tests/fm-backend-herdr-presentation-e2e.test.sh
 tests/fm-backend-herdr-eventwait-smoke.test.sh
 tests/fm-herdr-session-cleanup.test.sh
 tests/fm-herdr-session-cleanup-e2e.test.sh
+tests/fm-herdr-nm-visibility.test.sh
+tests/fm-herdr-nm-visibility-e2e.test.sh
 tests/fm-afk-inject-herdr-e2e.test.sh
 tests/fm-afk-pi-herdr-return-e2e.test.sh
 ```

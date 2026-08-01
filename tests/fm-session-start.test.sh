@@ -326,6 +326,8 @@ case "${1:-} ${2:-}" in
   "status --json")
     printf '%s\n' '{"client":{"protocol":14,"version":"test"},"server":{"running":true}}'
     ;;
+  "config check")
+    ;;
   "workspace list")
     printf '{"result":{"workspaces":[{"workspace_id":"ws1","label":"2ndmate-%s"}]}}\n' "$mate_id"
     ;;
@@ -364,11 +366,14 @@ case "${1:-} ${2:-}" in
     ;;
   "agent get")
     if [ "${3:-}" = p-new ] && [ -e "$spawned" ]; then
-      printf '%s\n' '{"result":{"agent":{"agent_status":"idle"}}}'
+      printf '%s\n' '{"result":{"agent":{"agent":"pi","name":"pi","agent_status":"idle"}}}'
     else
       printf '%s\n' '{"error":{"code":"agent_not_found"}}' >&2
       exit 1
     fi
+    ;;
+  "agent rename")
+    printf '{"result":{"agent":{"agent":"pi","name":"%s","agent_status":"idle"}}}\n' "${4:-}"
     ;;
   "pane close")
     [ "${3:-}" = p-old ] && : > "$killed"
@@ -468,13 +473,17 @@ EOF
   mate="$w/secondmate-$id"
   log="$w/herdr.log"
   state="$w/herdr.state"
-  mkdir -p "$mate/bin" "$mate/data" "$mate/state" "$mate/config" "$mate/projects"
+  mkdir -p "$mate/bin" "$mate/data" "$mate/state" "$mate/config" "$mate/projects" "$home/herdr"
   printf '%s\n' "$id" > "$mate/.fm-secondmate-home"
   printf '# Firstmate\n' > "$mate/AGENTS.md"
   printf 'Second mate charter.\n' > "$mate/data/charter.md"
   printf '%s\n' herdr > "$home/config/backend"
   printf '%s\n' pi > "$home/config/secondmate-harness"
   printf '%s\n' manual > "$home/config/backlog-backend"
+  cat > "$home/herdr/config.toml" <<'EOF'
+[ui.sidebar.agents.rows_by_agent]
+pi = [["state_icon", "agent", "tab"], ["state_text", "$nm_summary"]]
+EOF
   touch "$home/state/.last-watcher-beat"
   {
     printf 'window=default:p-old\n'
@@ -499,6 +508,7 @@ run_session_start_herdr_secondmate() {
   local root=$1 home=$2 fakebin=$3 mate=$4 log=$5 state=$6
   FM_BACKEND=herdr FM_FAKE_HERDR_LOG="$log" FM_FAKE_HERDR_STATE="$state" \
     FM_FAKE_SECOND_MATE_ID="$SESSION_START_HERDR_SECOND_MATE_ID" \
+    HERDR_CONFIG_PATH="$home/herdr/config.toml" \
     run_session_start "$home" "$root" "$fakebin:$BASE_PATH"
 }
 
@@ -716,7 +726,9 @@ SH
   i=1
   while [ "$i" -le 40 ]; do
     (
-      harness_pid=$BASHPID
+      sleep 30 &
+      harness_pid=$!
+      trap 'kill "$harness_pid" 2>/dev/null || true' EXIT
       : > "$home/state/harness-$harness_pid"
       : > "$ready/$i"
       while [ "$(find "$ready" -type f | wc -l | tr -d ' ')" -lt 40 ]; do
@@ -731,6 +743,8 @@ SH
       while [ "$(find "$completed" -type f | wc -l | tr -d ' ')" -lt 40 ]; do
         sleep 0.01
       done
+      kill "$harness_pid" 2>/dev/null || true
+      trap - EXIT
     ) &
     pids="$pids $!"
     i=$((i + 1))
@@ -966,7 +980,7 @@ EOF
   pass "session start: the proven bare-shell recovery path remains intact"
 }
 
-test_session_start_relaunches_herdr_husk_secondmate() {
+test_session_start_refuses_herdr_husk_relaunch_without_live_layout_proof() {
   local rec root home fakebin mate log state out
   rec=$(prepare_session_start_herdr_secondmate secondmate-herdr-husk)
   IFS='|' read -r root home fakebin mate log state <<EOF
@@ -975,14 +989,18 @@ EOF
 
   out=$(run_session_start_herdr_secondmate "$root" "$home" "$fakebin" "$mate" "$log" "$state")
 
-  assert_not_contains "$out" "SECONDMATE_LIVENESS:" "successful Herdr husk recovery should stay non-actionable"
+  assert_contains "$out" "SECONDMATE_LIVENESS:" \
+    "unsupported live Herdr layout verification should keep the failed recovery actionable"
   assert_contains "$(cat "$log")" "pane close p-old" "session start did not close the confirmed Herdr husk"
-  assert_contains "$(cat "$log")" "tab create" "session start did not relaunch the Herdr secondmate"
-  assert_contains "$out" "endpoint: alive (backend=herdr window=default:p-new)" \
-    "the later fleet read did not confirm the relaunched Herdr endpoint"
-  assert_grep 'herdr_pane_id=p-new' "$home/state/$SESSION_START_HERDR_SECOND_MATE_ID.meta" \
-    "the real respawn path did not record the replacement Herdr pane"
-  pass "session start: a confirmed Herdr husk is closed and relaunched"
+  assert_not_contains "$(cat "$log")" "tab create" \
+    "session start created a replacement despite unavailable live layout verification"
+  assert_not_contains "$(cat "$log")" "agent rename" \
+    "session start renamed an agent despite refusing the replacement before spawn"
+  assert_contains "$out" "endpoint: dead (backend=herdr window=default:p-old)" \
+    "the later fleet read did not retain the original endpoint after refusing the replacement"
+  assert_grep 'herdr_pane_id=p-old' "$home/state/$SESSION_START_HERDR_SECOND_MATE_ID.meta" \
+    "the refused recovery did not restore the original Herdr metadata"
+  pass "session start: a confirmed Herdr husk recovery refuses unsupported live layout proof"
 }
 
 # --- endpoint liveness: tmux and herdr, live and dead ------------------------
@@ -1365,7 +1383,7 @@ test_session_start_relaunches_missing_pi_secondmate
 test_session_start_preserves_ambiguous_pi_process
 test_session_start_preserves_transiently_unreadable_tmux
 test_session_start_preserves_proven_bare_shell_recovery
-test_session_start_relaunches_herdr_husk_secondmate
+test_session_start_refuses_herdr_husk_relaunch_without_live_layout_proof
 test_status_tail_bounding
 test_orphan_status_logs_are_printed
 test_endpoint_liveness_tmux

@@ -109,6 +109,130 @@ FM_BACKEND_HERDR_SECONDMATE_MARKER=".fm-secondmate-home"
 # spawn can replace one verified agent-free husk under the session lock.
 # No send, capture, Treehouse, or general task-ownership path reads it.
 FM_BACKEND_HERDR_PRESENTATION_JOURNAL_SUFFIX=".herdr-presentation"
+# A Herdr-backed Pi worker keeps its native `agent=pi` identity and receives a
+# task-specific human-facing `name` through Herdr's agent.rename API after Pi
+# registers on the pane.
+# The bounded poll never renames a shell or a different detected harness.
+FM_BACKEND_HERDR_PI_RENAME_POLLS=${FM_BACKEND_HERDR_PI_RENAME_POLLS:-50}
+FM_BACKEND_HERDR_PI_RENAME_POLL_SLEEP=${FM_BACKEND_HERDR_PI_RENAME_POLL_SLEEP:-0.2}
+
+fm_backend_herdr_pi_prominent_config_path() {
+  if [ -n "${HERDR_CONFIG_PATH:-}" ]; then
+    printf '%s\n' "$HERDR_CONFIG_PATH"
+  elif [ -n "${XDG_CONFIG_HOME:-}" ]; then
+    printf '%s/herdr/config.toml\n' "$XDG_CONFIG_HOME"
+  else
+    printf '%s/.config/herdr/config.toml\n' "$HOME"
+  fi
+}
+
+fm_backend_herdr_pi_prominent_configured() {
+  local config
+  config=$(fm_backend_herdr_pi_prominent_config_path) || return 1
+  [ -f "$config" ] && [ ! -L "$config" ] || return 1
+  HERDR_CONFIG_PATH="$config" herdr config check >/dev/null 2>&1 || return 1
+  awk '
+    /^[[:space:]]*\[/ {
+      section = $0
+      gsub(/[[:space:]]/, "", section)
+      next
+    }
+    section == "[ui.sidebar.agents.rows_by_agent]" {
+      row = $0
+      sub(/[[:space:]]*#.*/, "", row)
+      gsub(/[[:space:]]/, "", row)
+      if (row == "pi=[[\"state_icon\",\"agent\",\"tab\"],[\"state_text\",\"$nm_summary\"]]") {
+        found = 1
+      }
+    }
+    END { exit(found ? 0 : 1) }
+  ' "$config"
+}
+
+# fm_backend_herdr_pi_prominence_live_probe: report whether the RUNNING Herdr
+# client can prove its effective Pi sidebar row, independently of config.toml.
+# Output is one allowlisted state and reason separated by a tab:
+#   applied<TAB><reason>      exact task-name-first row is live
+#   stale<TAB><reason>        live row is known but does not match config
+#   unavailable<TAB><reason>  no exact live-client read is available
+# Herdr 0.7.4 protocol 16 has server.reload_config and window-title client
+# methods, but no live TUI sidebar-layout read, so it can never claim applied.
+# A future adapter may return applied only from an exact live-client response;
+# disk config, a server reload response, and a successful agent rename are not
+# sufficient. Tests override this narrow probe to exercise all three states.
+fm_backend_herdr_pi_prominence_live_probe() { # <session>
+  local session=$1 status schema
+  status=$(fm_backend_herdr_cli "$session" status --json 2>/dev/null) || {
+    printf 'unavailable\tlive-session-status-unreadable\n'
+    return 0
+  }
+  if ! printf '%s' "$status" | jq -e --arg session "$session" '
+    .server.running == true
+    and .server.compatible == true
+    and .server.session == $session
+    and .client.session == $session
+  ' >/dev/null 2>&1; then
+    printf 'unavailable\tlive-session-status-unverified\n'
+    return 0
+  fi
+  schema=$(fm_backend_herdr_cli "$session" api schema --json 2>/dev/null) || {
+    printf 'unavailable\tlive-api-schema-unreadable\n'
+    return 0
+  }
+  if ! printf '%s' "$schema" | jq -e '
+    [.schemas.request.oneOf[]?.properties.method.const]
+    | type == "array"
+  ' >/dev/null 2>&1; then
+    printf 'unavailable\tlive-api-schema-unverified\n'
+    return 0
+  fi
+  printf 'unavailable\tlive-sidebar-layout-read-unsupported\n'
+}
+
+fm_backend_herdr_pi_prominence_live_verify() { # <session>
+  local result state reason
+  FM_BACKEND_HERDR_PI_PROMINENCE_LIVE_STATE=unavailable
+  FM_BACKEND_HERDR_PI_PROMINENCE_LIVE_REASON=invalid-live-proof
+  result=$(fm_backend_herdr_pi_prominence_live_probe "$1") || return 3
+  state=${result%%$'\t'*}
+  reason=${result#*$'\t'}
+  [ "$reason" != "$result" ] || reason=missing-live-proof-reason
+  case "$state" in
+    applied)
+      FM_BACKEND_HERDR_PI_PROMINENCE_LIVE_STATE=applied
+      FM_BACKEND_HERDR_PI_PROMINENCE_LIVE_REASON=$reason
+      return 0
+      ;;
+    stale)
+      FM_BACKEND_HERDR_PI_PROMINENCE_LIVE_STATE=stale
+      FM_BACKEND_HERDR_PI_PROMINENCE_LIVE_REASON=$reason
+      return 2
+      ;;
+    unavailable)
+      # shellcheck disable=SC2034 # Read by fm-spawn after this verifier returns.
+      FM_BACKEND_HERDR_PI_PROMINENCE_LIVE_STATE=unavailable
+      # shellcheck disable=SC2034 # Diagnostic reason is consumed by focused callers and tests.
+      FM_BACKEND_HERDR_PI_PROMINENCE_LIVE_REASON=$reason
+      return 3
+      ;;
+  esac
+  return 3
+}
+
+# Remediation is guidance only. Firstmate never invokes Herdr reload, stop, or
+# restart operations while accepting or rejecting a worker spawn.
+fm_backend_herdr_pi_prominence_remediation() { # <session> <state>
+  local session=$1 state=$2 config
+  config=$(fm_backend_herdr_pi_prominent_config_path 2>/dev/null || printf '<Herdr config.toml>')
+  printf 'error: running Herdr session %s has Pi prominence state %s; refusing spawn because disk config alone is not live proof\n' "$session" "$state" >&2
+  printf 'remediation: validate %s, then wait until the entire Firstmate fleet using session %s is idle\n' "$config" "$session" >&2
+  if [ "$state" = unavailable ]; then
+    printf 'remediation: use a Herdr release that exposes exact live sidebar-layout verification; then perform one planned Herdr TUI reload or restart and retry\n' >&2
+  else
+    printf 'remediation: perform one planned Herdr TUI reload or restart and retry so the live task-name-first Pi row can be verified\n' >&2
+  fi
+  printf 'remediation: Firstmate will never reload or restart Herdr automatically\n' >&2
+}
 
 # fm_backend_herdr_workspace_label: the per-firstmate-HOME herdr workspace
 # label (docs/herdr-backend.md "Default task container shape"). The PRIMARY home (no
@@ -133,6 +257,72 @@ fm_backend_herdr_workspace_label() {
     fi
   fi
   printf 'firstmate'
+}
+
+# fm_backend_herdr_pi_worker_name: build the unique human-facing name for one
+# Firstmate-spawned Pi worker.
+# The owner/task prefix keeps the name meaningful in Herdr's agent sidebar, and
+# the exact response-derived pane id makes it unique even if two homes sharing a
+# Herdr session happen to reuse an owner label and task id.
+# The native Herdr identity remains `agent=pi`; this is only AgentInfo.name.
+fm_backend_herdr_pi_worker_name() { # <owner-label> <task-id> <kind> <pane-id>
+  local owner=$1 task=$2 kind=$3 pane=$4 subject
+  if [ "$owner" != firstmate ] \
+     && ! printf '%s\n' "$owner" | grep -Eq '^2ndmate-[A-Za-z0-9._-]+$'; then
+    return 1
+  fi
+  case "$task" in
+    ''|.*|*[!A-Za-z0-9._-]*) return 1 ;;
+  esac
+  case "$pane" in
+    ''|*[!A-Za-z0-9:_-]*) return 1 ;;
+  esac
+  if [ "$kind" = secondmate ]; then
+    subject=$owner
+  else
+    subject="$owner/$task"
+  fi
+  printf 'Pi · %s [%s]' "$subject" "$pane"
+}
+
+# fm_backend_herdr_name_pi_worker: wait only for a native Pi registration, then
+# set its human-facing Herdr name through agent.rename and verify the response.
+# A detected non-Pi identity returns 2 without mutation.
+# An absent/unreadable identity or rename failure returns 1 after a bounded wait.
+fm_backend_herdr_name_pi_worker() { # <target> <human-name>
+  local target=$1 human_name=$2 polls sleep_s attempt=0 out identity current renamed verified
+  fm_backend_herdr_parse_target "$target" || return 1
+  polls=$FM_BACKEND_HERDR_PI_RENAME_POLLS
+  sleep_s=$FM_BACKEND_HERDR_PI_RENAME_POLL_SLEEP
+  case "$polls" in ''|*[!0-9]*|0) polls=50 ;; esac
+  if ! printf '%s\n' "$sleep_s" | grep -Eq '^[0-9]+([.][0-9]+)?$'; then
+    sleep_s=0.2
+  fi
+  printf '%s\n' "$human_name" \
+    | grep -Eq '^Pi · (firstmate|2ndmate-[A-Za-z0-9._-]+)(/[A-Za-z0-9._-]+)? \[[A-Za-z0-9:_-]+\]$' \
+    || return 1
+  [ "${#human_name}" -le 192 ] || return 1
+  while [ "$attempt" -lt "$polls" ]; do
+    out=$(fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" agent get "$FM_BACKEND_HERDR_PANE" 2>/dev/null) || out=
+    identity=$(printf '%s' "$out" | jq -r '.result.agent.agent // empty' 2>/dev/null)
+    current=$(printf '%s' "$out" | jq -r '.result.agent.name // empty' 2>/dev/null)
+    if [ "$identity" = pi ]; then
+      [ "$current" = "$human_name" ] && return 0
+      renamed=$(fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" agent rename "$FM_BACKEND_HERDR_PANE" "$human_name" 2>/dev/null) || return 1
+      printf '%s' "$renamed" | jq -e --arg want "$human_name" '
+        .result.agent.agent == "pi" and .result.agent.name == $want
+      ' >/dev/null 2>&1 || return 1
+      verified=$(fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" agent get "$FM_BACKEND_HERDR_PANE" 2>/dev/null) || return 1
+      printf '%s' "$verified" | jq -e --arg want "$human_name" '
+        .result.agent.agent == "pi" and .result.agent.name == $want
+      ' >/dev/null 2>&1
+      return
+    fi
+    [ -z "$identity" ] || return 2
+    attempt=$((attempt + 1))
+    [ "$attempt" -ge "$polls" ] || sleep "$sleep_s"
+  done
+  return 1
 }
 
 # fm_backend_herdr_cli: run `herdr <args...>` scoped to <session>, setting

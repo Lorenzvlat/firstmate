@@ -101,6 +101,8 @@ init_changed_fixture_repo() {
     fm-captain-translation-contract.test.sh \
     fm-cd-pretool-check.test.sh \
     fm-daemon.test.sh \
+    fm-herdr-nm-visibility.test.sh \
+    fm-herdr-nm-visibility-e2e.test.sh \
     fm-backend-herdr-smoke.test.sh \
     fm-secondmate-safety.test.sh \
     fm-session-start.test.sh \
@@ -118,6 +120,7 @@ init_changed_fixture_repo() {
   done
   : >"$repo/tests/lib.sh"
   : >"$repo/tests/fm-backend-herdr-eventwait.test.py"
+  : >"$repo/bin/fm-nm-status-lib.sh"
   : >"$repo/bin/fm-supervisor-target-lib.sh"
   : >"$repo/bin/unmapped-source.sh"
   printf '# .claude/settings.json\n# .pi/extensions/fm-primary-turnend-guard.ts\n' \
@@ -161,6 +164,13 @@ test_changed_dependency_selection_and_unmapped_failure() {
   assert_contains "$listed" "tests/fm-afk-return.test.sh" "supervisor target selects afk coverage"
   git -C "$repo" add bin/fm-supervisor-target-lib.sh
   git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm supervisor-change
+
+  printf '\n' >>"$repo/bin/fm-nm-status-lib.sh"
+  listed=$(cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD)
+  assert_contains "$listed" "tests/fm-herdr-nm-visibility.test.sh" "No Mistakes status parser selects visibility coverage"
+  assert_contains "$listed" "tests/fm-herdr-nm-visibility-e2e.test.sh" "No Mistakes status parser selects real Herdr coverage"
+  git -C "$repo" add bin/fm-nm-status-lib.sh
+  git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm nm-status-change
 
   printf '\n' >>"$repo/.agents/skills/example/SKILL.md"
   printf '\n' >>"$repo/.claude/settings.json"

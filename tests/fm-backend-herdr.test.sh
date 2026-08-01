@@ -1325,7 +1325,8 @@ test_projected_spawn_disarms_cleanup_before_ambiguous_launch_submission() {
   enter_pattern='spawn_send_key "$T" Enter'
   literal_line=$(grep -nF "$literal_pattern" "$ROOT/bin/fm-spawn.sh" | tail -1 | cut -d: -f1)
   disarm_line=$(grep -nF "$disarm_pattern" "$ROOT/bin/fm-spawn.sh" | tail -1 | cut -d: -f1)
-  release_line=$(grep -nF "$release_pattern" "$ROOT/bin/fm-spawn.sh" | tail -1 | cut -d: -f1)
+  release_line=$(grep -nF "$release_pattern" "$ROOT/bin/fm-spawn.sh" \
+    | awk -F: -v after="$disarm_line" '$1 > after { print $1; exit }')
   enter_line=$(grep -nF "$enter_pattern" "$ROOT/bin/fm-spawn.sh" | tail -1 | cut -d: -f1)
   [ -n "$literal_line" ] && [ -n "$disarm_line" ] && [ -n "$release_line" ] && [ -n "$enter_line" ] \
     || fail "could not locate the projected launch cleanup boundary"

@@ -131,7 +131,7 @@ family_for_basename() {
     fm-test-run.test.sh|fm-test-isolation-proof.test.sh)
       printf '%s\n' pure-contract-unit
       ;;
-    fm-daemon.test.sh|fm-guard-stale-banner.test.sh|fm-pi-watch-extension.test.sh|\
+    fm-daemon.test.sh|fm-guard-stale-banner.test.sh|fm-herdr-nm-visibility.test.sh|fm-pi-watch-extension.test.sh|\
     fm-supervision-events.test.sh|fm-turnend-guard.test.sh|fm-wake-daemon-lifecycle-e2e.test.sh|\
     fm-wake-queue.test.sh|fm-watch-checkpoint.test.sh|fm-watch-triage.test.sh|\
     fm-watcher-lock.test.sh)
@@ -140,7 +140,7 @@ family_for_basename() {
     fm-afk-inject-herdr-e2e.test.sh|fm-afk-launch.test.sh|fm-backend-autodetect-smoke.test.sh|\
     fm-backend-herdr-eventwait-smoke.test.sh|fm-backend-herdr-presentation-e2e.test.sh|\
     fm-backend-herdr-prune-safety-e2e.test.sh|fm-backend-herdr-respawn-idem-e2e.test.sh|\
-    fm-herdr-session-cleanup-e2e.test.sh|\
+    fm-herdr-session-cleanup-e2e.test.sh|fm-herdr-nm-visibility-e2e.test.sh|\
     fm-backend-herdr-smoke.test.sh|fm-backend-herdr-workspace-per-home-e2e.test.sh)
       printf '%s\n' real-herdr-gated
       ;;
@@ -615,10 +615,15 @@ families_for_changed_path() {
     bin/fm-test-run.sh|bin/fm-test-isolation-proof.sh)
       printf '%s\n' pure-contract-unit
       ;;
+    bin/fm-herdr-nm-visibility-lib.sh|bin/fm-nm-status-lib.sh)
+      printf '%s\n' watcher-wake-lock
+      printf '%s\n' real-herdr-gated
+      ;;
     bin/backends/herdr*|bin/fm-herdr-lab.sh|tests/herdr-test-safety.sh)
       printf '%s\n' real-herdr-gated
       printf '%s\n' backend-dispatch
       printf '%s\n' pure-contract-unit
+      printf '%s\n' watcher-wake-lock
       ;;
     bin/fm-herdr-session-cleanup.sh)
       printf '%s\n' session-bootstrap
@@ -664,11 +669,21 @@ families_for_changed_path() {
     bin/fm-gate-refuse*|bin/fm-lock*)
       printf '%s\n' session-bootstrap
       ;;
-    bin/fm-pr-*|bin/fm-merge-local.sh|bin/fm-teardown.sh|bin/fm-review-diff.sh|\
+    bin/fm-teardown.sh)
+      printf '%s\n' pr-forge
+      printf '%s\n' watcher-wake-lock
+      ;;
+    bin/fm-pr-*|bin/fm-merge-local.sh|bin/fm-review-diff.sh|\
     bin/fm-x-*|bin/fm-check*)
       printf '%s\n' pr-forge
       ;;
-    bin/fm-spawn.sh|bin/fm-send.sh|bin/fm-harness.sh|\
+    bin/fm-spawn.sh)
+      printf '%s\n' backend-dispatch
+      printf '%s\n' pure-contract-unit
+      printf '%s\n' real-herdr-gated
+      printf '%s\n' watcher-wake-lock
+      ;;
+    bin/fm-send.sh|bin/fm-harness.sh|\
     bin/fm-peek.sh|bin/fm-composer*)
       printf '%s\n' backend-dispatch
       printf '%s\n' pure-contract-unit
