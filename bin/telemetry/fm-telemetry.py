@@ -440,6 +440,10 @@ def meta_projection(path: Path, root: Path) -> dict[str, str] | None:
     return {"harness": harness_values[0], "reason": reason, "effort": effort}
 
 
+class Deadline(Exception):
+    """Bounded-budget expiry that no projection handler is allowed to absorb."""
+
+
 def snapshot_worker(root: Path) -> dict[str, Any]:
     warnings: list[str] = []
     omitted = 0
@@ -527,14 +531,14 @@ def snapshot_worker(root: Path) -> dict[str, Any]:
 
 def snapshot_worker_bounded(root: Path) -> dict[str, Any]:
     def timed_out(_signum: int, _frame: Any) -> None:
-        raise TimeoutError
+        raise Deadline
 
     previous = signal.getsignal(signal.SIGALRM)
     signal.signal(signal.SIGALRM, timed_out)
     signal.setitimer(signal.ITIMER_REAL, 3)
     try:
         return snapshot_worker(root)
-    except TimeoutError:
+    except Deadline:
         return {
             "schema": "fm-worker-telemetry-snapshot.v1",
             "generatedAt": iso_from_epoch(now_epoch()),
@@ -590,6 +594,8 @@ def claude_status_update(root: Path, task_id: str, payload: bytes) -> None:
         return
     with RecordLock(root, task_id):
         record = load_current_record(root, task_id)
+        if record["status"] != "unavailable" and record["model"].get("id") == model_id:
+            return
         provider = record["model"].get("provider")
         record["model"] = {"provider": provider, "id": model_id}
         record["observedAt"] = iso_from_epoch(now_epoch())
@@ -628,11 +634,7 @@ def run_bounded_command(
             events = selector.select(max(0, min(0.05, deadline - time.monotonic())))
             if not events:
                 if process.poll() is not None:
-                    chunk = os.read(process.stdout.fileno(), 4096)
-                    if chunk:
-                        output.extend(chunk)
-                    else:
-                        break
+                    break
                 continue
             chunk = os.read(process.stdout.fileno(), 4096)
             if not chunk:
@@ -838,25 +840,59 @@ def claude_privacy_self_test() -> bool:
     return not any(marker in encoded for marker in marker_values + ["SESSION_PRIVATE_MARKER"])
 
 
+class UsageCoverage:
+    """Sticky per-collector record of usage that was admitted but never counted."""
+
+    def __init__(self) -> None:
+        self.lock = threading.Lock()
+        self.dropped = False
+
+    def mark_dropped(self) -> None:
+        with self.lock:
+            self.dropped = True
+
+    def complete(self) -> bool:
+        with self.lock:
+            return not self.dropped
+
+
+def demote_usage_coverage(record: dict[str, Any]) -> None:
+    record["status"] = "partial"
+    record["coverage"] = "since_observed"
+    record["observedAt"] = iso_from_epoch(now_epoch())
+    record["final"] = False
+
+
+def note_usage_gap(root: Path, task_id: str, generation: str, coverage: UsageCoverage) -> None:
+    coverage.mark_dropped()
+    try:
+        with RecordLock(root, task_id):
+            record = load_current_record(root, task_id)
+            if record["generation"] != generation or record["harness"] != "claude":
+                return
+            demote_usage_coverage(record)
+            write_current_record(root, task_id, record)
+    except (OSError, ValueError, json.JSONDecodeError):
+        return
+
+
 def update_claude_usage(
     root: Path,
     task_id: str,
     generation: str,
     provider: str | None,
     projected: dict[str, Any],
+    coverage: UsageCoverage,
 ) -> None:
     with RecordLock(root, task_id):
         record = load_current_record(root, task_id)
         if record["generation"] != generation or record["harness"] != "claude":
             return
-        if projected.get("invalid"):
-            record["status"] = "partial"
-            record["coverage"] = "since_observed"
-            record["observedAt"] = iso_from_epoch(now_epoch())
-            write_current_record(root, task_id, record)
-            return
         usage = projected.get("usage")
-        if not isinstance(usage, dict):
+        if projected.get("invalid") or not isinstance(usage, dict):
+            coverage.mark_dropped()
+            demote_usage_coverage(record)
+            write_current_record(root, task_id, record)
             return
         current = record["tokens"]
         if any(current[key] is None for key in ("input", "output", "cacheRead", "cacheWrite", "total")):
@@ -873,14 +909,16 @@ def update_claude_usage(
         for key in ("input", "output", "cacheRead", "cacheWrite"):
             total = current[key] + usage[key]
             if total > MAX_SAFE_INTEGER:
-                record["status"] = "partial"
-                record["coverage"] = "since_observed"
-                record["observedAt"] = iso_from_epoch(now_epoch())
+                coverage.mark_dropped()
+                demote_usage_coverage(record)
                 write_current_record(root, task_id, record)
                 return
             next_values[key] = total
         total = sum(next_values.values())
         if total > MAX_SAFE_INTEGER:
+            coverage.mark_dropped()
+            demote_usage_coverage(record)
+            write_current_record(root, task_id, record)
             return
         record["tokens"] = {
             **next_values,
@@ -890,8 +928,12 @@ def update_claude_usage(
         }
         if projected.get("querySource") == "main" and projected.get("model") is not None:
             record["model"] = {"provider": provider, "id": projected["model"]}
-        record["status"] = "fresh"
-        record["coverage"] = "full_worker"
+        if coverage.complete():
+            record["status"] = "fresh"
+            record["coverage"] = "full_worker"
+        else:
+            record["status"] = "partial"
+            record["coverage"] = "since_observed"
         record["observedAt"] = iso_from_epoch(now_epoch())
         record["final"] = False
         write_current_record(root, task_id, record)
@@ -930,6 +972,7 @@ class ClaudeCollector(http.server.ThreadingHTTPServer):
         self.generation = generation
         self.provider = provider
         self.token = token
+        self.usage_coverage = UsageCoverage()
         self.seen: set[str] = set()
         self.order: deque[str] = deque()
         self.seen_lock = threading.Lock()
@@ -1003,6 +1046,12 @@ class ClaudeCollectorHandler(http.server.BaseHTTPRequestHandler):
             return
         records = iter_log_records(payload)
         if records is None:
+            note_usage_gap(
+                self.server.root,
+                self.server.task_id,
+                self.server.generation,
+                self.server.usage_coverage,
+            )
             self.generic(400)
             return
         for row in records:
@@ -1016,8 +1065,15 @@ class ClaudeCollectorHandler(http.server.BaseHTTPRequestHandler):
                     self.server.generation,
                     self.server.provider,
                     projected,
+                    self.server.usage_coverage,
                 )
             except (OSError, ValueError, json.JSONDecodeError):
+                note_usage_gap(
+                    self.server.root,
+                    self.server.task_id,
+                    self.server.generation,
+                    self.server.usage_coverage,
+                )
                 continue
         body = b"{}\n"
         self.send_response(200)

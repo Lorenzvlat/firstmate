@@ -32,16 +32,23 @@ Command:
 bin/fm-test-run.sh tests/fm-worker-telemetry.test.sh
 ```
 
-Exact focused result on 2026-08-01 after the identity-preserving cleanup fix:
+Exact focused result on 2026-08-06 after the bounded-budget, coverage, and enforcing-assertion fixes:
 
 ```text
 ok - worker snapshot bounds count, bytes, owner mode, symlinks, and generic warning enums
 ok - worker snapshot distinguishes status/integer controls and projects only fixed selection rationale labels
 ok - Pi projects exact resolved model and finalized token components without content access
 ok - Claude collector is loopback-only, privacy-pinned, deduplicated, allowlisted, and task-scoped
+ok - snapshot deadline is never absorbed by a projection handler and a bounded command never waits on an inherited pipe
+ok - Claude uncounted usage downgrades coverage once and never restores full_worker
+ok - status-line renders update the record only when the projected model actually changes
 ok - Claude stop refuses an unrelated process even when a private control record names its PID
 FM_TEST_SUMMARY total=1 failed=0 skipped_gate=0
 ```
+
+The bounded-budget fixture holds the snapshot's record reader for 30 seconds and confirms the 3-second deadline still returns the empty bounded projection, and it runs a bounded command whose exited child leaves a 30-second grandchild holding the stdout pipe, confirming the reader returns immediately instead of blocking past its budget.
+The coverage fixture drops one admitted observation, then feeds a valid one, and confirms the record stays `partial`/`since_observed` while still summing the counted tokens.
+Both suites' JSON assertions now fail the run rather than only printing to stderr.
 
 The generated-extension fixture also asserts that the extension source contains neither `message.content` nor `sessionManager` access.
 

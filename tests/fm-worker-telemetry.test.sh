@@ -14,11 +14,14 @@ CLAUDE="$ROOT/bin/fm-claude-telemetry.sh"
 BASE_PATH=$PATH
 
 json_assert() { # <json> <python expression over value>
-  JSON_INPUT=$1 ASSERTION=$2 python3 - <<'PY'
+  if ! JSON_INPUT=$1 ASSERTION=$2 python3 - <<'PY'
 import json, os
 value = json.loads(os.environ["JSON_INPUT"])
 assert eval(os.environ["ASSERTION"], {"value": value})
 PY
+  then
+    fail "assertion failed: $2"$'\n'"--- json ---"$'\n'"$1"
+  fi
 }
 
 make_meta() { # <state> <id> <harness>
@@ -283,6 +286,138 @@ PY
   pass "Claude collector is loopback-only, privacy-pinned, deduplicated, allowlisted, and task-scoped"
 }
 
+test_bounded_budgets_survive_slow_sources_and_lingering_pipes() {
+  local state out
+  state="$TMP_ROOT/budgets/state"
+  mkdir -p "$state"
+  make_meta "$state" slow-x1 pi
+  FM_STATE_OVERRIDE="$state" "$INIT" slow-x1 pi >/dev/null || fail "budget fixture init failed"
+  out=$(FM_TELEMETRY_STATE="$state" FM_TELEMETRY_MODULE="$ROOT/bin/telemetry/fm-telemetry.py" python3 - <<'PY'
+import importlib.util, json, os, time
+
+spec = importlib.util.spec_from_file_location("fm_telemetry", os.environ["FM_TELEMETRY_MODULE"])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+
+def slow_read(*_args, **_kwargs):
+    time.sleep(30)
+    return {}
+
+module.read_secure_json = slow_read
+started = time.monotonic()
+snapshot = module.snapshot_worker_bounded(module.state_root(os.environ["FM_TELEMETRY_STATE"]))
+result = {
+    "snapshotElapsed": time.monotonic() - started,
+    "workers": snapshot["workers"],
+    "warnings": snapshot["warnings"],
+}
+
+started = time.monotonic()
+returncode, output, reason = module.run_bounded_command(
+    ["/bin/sh", "-c", "sleep 30 & printf ok"], dict(os.environ), 2, 16 * 1024
+)
+result["commandElapsed"] = time.monotonic() - started
+result["returncode"] = returncode
+result["output"] = None if output is None else output.decode()
+result["reason"] = reason
+print(json.dumps(result))
+PY
+  ) || fail "bounded budget probe failed"
+  json_assert "$out" 'value["snapshotElapsed"] < 10'
+  json_assert "$out" 'value["workers"] == [] and value["warnings"] == ["source_error"]'
+  json_assert "$out" 'value["commandElapsed"] < 2'
+  json_assert "$out" 'value["output"] == "ok" and value["reason"] is None and value["returncode"] == 0'
+  pass "snapshot deadline is never absorbed by a projection handler and a bounded command never waits on an inherited pipe"
+}
+
+test_claude_usage_gap_downgrades_coverage_permanently() {
+  local state dropped_generation overflow_generation out
+  state="$TMP_ROOT/coverage/state"
+  mkdir -p "$state"
+  make_meta "$state" dropped-x1 claude
+  make_meta "$state" overflow-x2 claude
+  dropped_generation=$(FM_STATE_OVERRIDE="$state" "$INIT" dropped-x1 claude) \
+    || fail "dropped-usage fixture init failed"
+  overflow_generation=$(FM_STATE_OVERRIDE="$state" "$INIT" overflow-x2 claude) \
+    || fail "overflow fixture init failed"
+  out=$(FM_TELEMETRY_STATE="$state" FM_TELEMETRY_MODULE="$ROOT/bin/telemetry/fm-telemetry.py" \
+    FM_TELEMETRY_DROPPED_GENERATION="$dropped_generation" \
+    FM_TELEMETRY_OVERFLOW_GENERATION="$overflow_generation" python3 - <<'PY'
+import importlib.util, json, os
+
+spec = importlib.util.spec_from_file_location("fm_telemetry", os.environ["FM_TELEMETRY_MODULE"])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+root = module.state_root(os.environ["FM_TELEMETRY_STATE"])
+
+def usage(values):
+    return dict(zip(("input", "output", "cacheRead", "cacheWrite"), values))
+
+def valid(values):
+    return {"usage": usage(values), "querySource": "main", "model": "claude-sonnet-4-5"}
+
+def state(task_id):
+    record = module.load_current_record(root, task_id)
+    return {"status": record["status"], "coverage": record["coverage"], "tokens": record["tokens"]}
+
+dropped = module.UsageCoverage()
+generation = os.environ["FM_TELEMETRY_DROPPED_GENERATION"]
+module.update_claude_usage(root, "dropped-x1", generation, "anthropic", valid((1, 2, 3, 4)), dropped)
+result = {"counted": state("dropped-x1")}
+module.update_claude_usage(root, "dropped-x1", generation, "anthropic", {"invalid": True}, dropped)
+result["afterDrop"] = state("dropped-x1")
+module.update_claude_usage(root, "dropped-x1", generation, "anthropic", valid((1, 1, 1, 1)), dropped)
+result["afterRecovery"] = state("dropped-x1")
+
+overflow = module.UsageCoverage()
+half = module.MAX_SAFE_INTEGER // 2 + 1
+module.update_claude_usage(
+    root,
+    "overflow-x2",
+    os.environ["FM_TELEMETRY_OVERFLOW_GENERATION"],
+    "anthropic",
+    valid((half, half, 0, 0)),
+    overflow,
+)
+result["afterOverflow"] = state("overflow-x2")
+result["overflowDropped"] = not overflow.complete()
+print(json.dumps(result))
+PY
+  ) || fail "Claude usage coverage probe failed"
+  json_assert "$out" 'value["counted"]["status"] == "fresh" and value["counted"]["coverage"] == "full_worker"'
+  json_assert "$out" 'value["counted"]["tokens"]["total"] == 10'
+  json_assert "$out" 'value["afterDrop"]["status"] == "partial" and value["afterDrop"]["coverage"] == "since_observed"'
+  json_assert "$out" 'value["afterRecovery"]["status"] == "partial" and value["afterRecovery"]["coverage"] == "since_observed"'
+  json_assert "$out" 'value["afterRecovery"]["tokens"]["total"] == 14'
+  json_assert "$out" 'value["afterOverflow"]["status"] == "partial" and value["afterOverflow"]["coverage"] == "since_observed"'
+  json_assert "$out" 'value["afterOverflow"]["tokens"]["total"] is None and value["overflowDropped"] is True'
+  pass "Claude uncounted usage downgrades coverage once and never restores full_worker"
+}
+
+test_claude_status_line_skips_redundant_record_writes() {
+  local state record first second third out
+  state="$TMP_ROOT/statusline/state"
+  mkdir -p "$state"
+  record="$state/statusline-x1.telemetry.json"
+  make_meta "$state" statusline-x1 claude
+  FM_STATE_OVERRIDE="$state" "$INIT" statusline-x1 claude >/dev/null \
+    || fail "status-line fixture init failed"
+  printf '%s' '{"model":{"id":"claude-sonnet-4-5"}}' \
+    | FM_STATE_OVERRIDE="$state" "$CLAUDE" status statusline-x1
+  first=$(stat -f '%i' "$record" 2>/dev/null || stat -c '%i' "$record")
+  printf '%s' '{"model":{"id":"claude-sonnet-4-5"}}' \
+    | FM_STATE_OVERRIDE="$state" "$CLAUDE" status statusline-x1
+  second=$(stat -f '%i' "$record" 2>/dev/null || stat -c '%i' "$record")
+  [ "$first" = "$second" ] || fail "an unchanged status-line render rewrote the telemetry record"
+  printf '%s' '{"model":{"id":"claude-opus-4"}}' \
+    | FM_STATE_OVERRIDE="$state" "$CLAUDE" status statusline-x1
+  third=$(stat -f '%i' "$record" 2>/dev/null || stat -c '%i' "$record")
+  [ "$second" != "$third" ] || fail "a changed status-line model did not update the telemetry record"
+  out=$(FM_STATE_OVERRIDE="$state" "$SNAPSHOT" --json) || fail "status-line worker snapshot failed"
+  json_assert "$out" 'value["workers"][0]["model"] == {"provider":None,"id":"claude-opus-4"}'
+  pass "status-line renders update the record only when the projected model actually changes"
+}
+
 test_claude_stop_refuses_unrelated_process() {
   local state unrelated process_start
   state="$TMP_ROOT/claude-unrelated/state"
@@ -316,4 +451,7 @@ test_snapshot_bounds_and_hostile_files
 test_snapshot_status_timestamp_and_integer_controls
 test_pi_projection_exact_usage_and_passive_failure
 test_claude_loopback_allowlist_dedupe_and_cleanup
+test_bounded_budgets_survive_slow_sources_and_lingering_pipes
+test_claude_usage_gap_downgrades_coverage_permanently
+test_claude_status_line_skips_redundant_record_writes
 test_claude_stop_refuses_unrelated_process

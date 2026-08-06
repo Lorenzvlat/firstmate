@@ -155,6 +155,8 @@ Claude input, output, cache-read, and cache-creation values are disjoint categor
 The projected total is therefore their exact safe-integer sum and uses `sum_of_disjoint_components` semantics.
 Usage from main, subagent, compaction, and auxiliary requests contributes to the worker total.
 Only a main-query event or official status-line update may select the displayed model.
+A malformed, rejected, or overflowing usage observation changes coverage to `since_observed` for the remaining life of that collector, so a later valid event never restores `full_worker`.
+A status-line update that repeats the already recorded model leaves the record untouched, because the collector heartbeat rather than the status line owns freshness.
 
 Collector cleanup validates the owner-only control record, task ID, PID, process start instant, executable script, state root, and exact collector arguments before signaling.
 It waits a bounded interval after TERM and uses KILL only after the same complete process identity is revalidated.

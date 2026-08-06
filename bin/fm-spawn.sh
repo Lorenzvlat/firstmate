@@ -9,8 +9,8 @@
 #   axes chosen by firstmate at intake. --selection-reason records only the fixed
 #   model-selection provenance enum explicit_captain_override|matched_dispatch_rule|
 #   configured_default|static_default|quota_fallback|unavailable. It never accepts
-#   rule prose or model reasoning. An omitted reason is static_default only when the
-#   static harness path was resolved here; every explicit/profile path is unavailable.
+#   rule prose or model reasoning. An omitted reason is always unavailable; the
+#   caller owns provenance and fm-spawn never infers it from how HARNESS resolved.
 #   Model and effort values are only threaded into harnesses whose
 #   installed CLIs were verified to support that axis; unsupported axes are omitted
 #   from that harness's launch rather than guessed.

@@ -11,11 +11,14 @@ SNAPSHOT="$ROOT/bin/fm-plan-usage-snapshot.sh"
 BASE_PATH=$PATH
 
 json_assert() { # <json> <python expression over value>
-  JSON_INPUT=$1 ASSERTION=$2 python3 - <<'PY'
+  if ! JSON_INPUT=$1 ASSERTION=$2 python3 - <<'PY'
 import json, os
 value = json.loads(os.environ["JSON_INPUT"])
 assert eval(os.environ["ASSERTION"], {"value": value})
 PY
+  then
+    fail "assertion failed: $2"$'\n'"--- json ---"$'\n'"$1"
+  fi
 }
 
 make_fake_codex() { # <root>
@@ -235,6 +238,8 @@ PY
   out=$(FM_PLAN_USAGE_MANUAL=1 FM_CONFIG_OVERRIDE="$root/config" run_snapshot "$root" 1785542400) \
     || fail "oversized manual refusal failed"
   json_assert "$out" 'value["providers"][1]["reason"] == "source_error" and value["providers"][1]["windows"] == []'
+  assert_grep 'config/plan-usage-manual.json' "$ROOT/.gitignore" \
+    "the documented local manual plan snapshot is not gitignored"
   pass "manual Claude plan input is disabled by default, owner-only, bounded, explicit, and expiring"
 }
 
