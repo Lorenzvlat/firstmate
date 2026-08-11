@@ -32,6 +32,11 @@ from typing import Any
 
 MAX_SAFE_INTEGER = 9_007_199_254_740_991
 TASK_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$", re.ASCII)
+GENERATION_RE = re.compile(r"^[a-f0-9]{32}$", re.ASCII)
+# A Claude worker proves it is still running by rendering its own status line or
+# by exporting to its own collector. Freshness may outlive the last such proof
+# by at most this many seconds, so a record ages to stale after the worker exits.
+WORKER_LIVENESS_WINDOW = 120.0
 PROVIDER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:+/-]{0,39}$", re.ASCII)
 MODEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:+/-]{0,119}$", re.ASCII)
 SCOPE_LABEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 ._+:/-]{0,63}$", re.ASCII)
@@ -292,6 +297,46 @@ def atomic_text(path: Path, root: Path, value: str, max_bytes: int) -> None:
 
 def lock_path(root: Path, task_id: str) -> Path:
     return root / f".{task_id}.telemetry.lock"
+
+
+def liveness_path(root: Path, task_id: str) -> Path:
+    return root / f".{task_id}.claude-live"
+
+
+def note_worker_liveness(root: Path, task_id: str) -> None:
+    """Record that this task's own Claude worker just proved it is still running."""
+    if not TASK_ID_RE.fullmatch(task_id):
+        return
+    path = liveness_path(root, task_id)
+    try:
+        if path.parent.resolve(strict=True) != root or not contained(root, path):
+            return
+        flags = os.O_WRONLY | os.O_CREAT
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        fd = os.open(path, flags, 0o600)
+        try:
+            info = os.fstat(fd)
+            if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid():
+                return
+            os.fchmod(fd, 0o600)
+            os.pwrite(fd, b"1", 0)
+        finally:
+            os.close(fd)
+    except OSError:
+        return
+
+
+def worker_liveness_fresh(root: Path, task_id: str) -> bool:
+    try:
+        info = liveness_path(root, task_id).lstat()
+    except OSError:
+        return False
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+        return False
+    if info.st_uid != os.geteuid():
+        return False
+    return time.time() - info.st_mtime <= WORKER_LIVENESS_WINDOW
 
 
 class RecordLock:
@@ -578,22 +623,31 @@ def write_current_record(root: Path, task_id: str, record: dict[str, Any]) -> No
     atomic_json(root / f"{task_id}.telemetry.json", root, validated, 16 * 1024)
 
 
-def claude_status_update(root: Path, task_id: str, payload: bytes) -> None:
+def status_line_model(payload: bytes) -> str | None:
     if len(payload) > 16 * 1024:
-        return
+        return None
     try:
         source = json.loads(payload.decode("utf-8"))
     except (UnicodeError, json.JSONDecodeError):
-        return
+        return None
     if not isinstance(source, dict):
-        return
+        return None
     model_obj = source.get("model")
     model_id = model_obj.get("id") if isinstance(model_obj, dict) else None
-    model_id = safe_identifier(model_id, MODEL_RE)
-    if model_id is None:
+    return safe_identifier(model_id, MODEL_RE)
+
+
+def claude_status_update(root: Path, task_id: str, generation: str, payload: bytes) -> None:
+    if not TASK_ID_RE.fullmatch(task_id) or not GENERATION_RE.fullmatch(generation):
         return
     with RecordLock(root, task_id):
         record = load_current_record(root, task_id)
+        if record["generation"] != generation or record["harness"] != "claude":
+            return
+        note_worker_liveness(root, task_id)
+        model_id = status_line_model(payload)
+        if model_id is None:
+            return
         if record["status"] != "unavailable" and record["model"].get("id") == model_id:
             return
         provider = record["model"].get("provider")
@@ -939,6 +993,14 @@ def update_claude_usage(
         write_current_record(root, task_id, record)
 
 
+def heartbeat_tick(root: Path, task_id: str, generation: str) -> bool:
+    """Heartbeat only while the task's own worker is still proving liveness."""
+    if not worker_liveness_fresh(root, task_id):
+        return False
+    heartbeat_record(root, task_id, generation)
+    return True
+
+
 def heartbeat_record(root: Path, task_id: str, generation: str) -> None:
     try:
         with RecordLock(root, task_id):
@@ -1022,6 +1084,7 @@ class ClaudeCollectorHandler(http.server.BaseHTTPRequestHandler):
         if self.headers.get("x-firstmate-telemetry-token") != self.server.token:
             self.generic(403)
             return
+        note_worker_liveness(self.server.root, self.server.task_id)
         content_type = self.headers.get("Content-Type", "").split(";", 1)[0].strip().lower()
         if content_type != "application/json":
             self.generic(415)
@@ -1132,7 +1195,7 @@ def collector_process(root: Path, task_id: str, bootstrap: Path, ready: Path) ->
 
     def heartbeat() -> None:
         while not stopping.wait(30):
-            heartbeat_record(root, task_id, generation)
+            heartbeat_tick(root, task_id, generation)
 
     threading.Thread(target=heartbeat, daemon=True).start()
     try:
@@ -1231,6 +1294,7 @@ def stop_collector(root: Path, task_id: str, *, remove_record: bool) -> None:
         control_path,
         root / f".{task_id}.claude-ready.json",
         root / f".{task_id}.claude-bootstrap.json",
+        liveness_path(root, task_id),
     ):
         try:
             path.unlink()
@@ -1289,6 +1353,20 @@ def start_collector(root: Path, task_id: str, env_path: Path) -> bool:
         except FileNotFoundError:
             pass
         return False
+
+    def abandon() -> bool:
+        # A failed start never leaves the task's own collector running.
+        try:
+            child.terminate()
+        except OSError:
+            pass
+        try:
+            child.wait(timeout=0.5)
+        except subprocess.TimeoutExpired:
+            pass
+        stop_collector(root, task_id, remove_record=False)
+        return False
+
     deadline = time.monotonic() + 2
     ready_value: Any = None
     while time.monotonic() < deadline:
@@ -1304,22 +1382,11 @@ def start_collector(root: Path, task_id: str, env_path: Path) -> bool:
     except FileNotFoundError:
         pass
     if not isinstance(ready_value, dict) or set(ready_value) != {"port", "token"}:
-        try:
-            child.terminate()
-        except OSError:
-            pass
-        return False
+        return abandon()
     port = safe_int(ready_value.get("port"), 1, 65535)
     ready_token = ready_value.get("token")
     if port is None or ready_token != token:
-        try:
-            child.terminate()
-        except OSError:
-            pass
-        return False
-    env_root = env_path.parent.resolve(strict=True)
-    if env_path.parent.is_symlink() or not contained(env_root, env_path):
-        return False
+        return abandon()
     endpoint = f"http://127.0.0.1:{port}"
     exports = {
         "CLAUDE_CODE_ENABLE_TELEMETRY": "1",
@@ -1337,7 +1404,13 @@ def start_collector(root: Path, task_id: str, env_path: Path) -> bool:
         "OTEL_METRICS_INCLUDE_ACCOUNT_UUID": "false",
     }
     text = "".join(f"export {key}={shell_single_quote(value)}\n" for key, value in exports.items())
-    atomic_text(env_path, env_root, text, 8192)
+    try:
+        env_root = env_path.parent.resolve(strict=True)
+        if env_path.parent.is_symlink() or not contained(env_root, env_path):
+            return abandon()
+        atomic_text(env_path, env_root, text, 8192)
+    except (OSError, ValueError):
+        return abandon()
     return True
 
 
@@ -1876,10 +1949,10 @@ def main(argv: list[str]) -> int:
             root = state_root(argv[1])
             print(initialize_record(root, argv[2], argv[3]))
             return 0
-        if action == "claude-status" and len(argv) == 3:
+        if action == "claude-status" and len(argv) == 4:
             root = state_root(argv[1])
             payload = sys.stdin.buffer.read(16 * 1024 + 1)
-            claude_status_update(root, argv[2], payload)
+            claude_status_update(root, argv[2], argv[3], payload)
             return 0
         if action == "claude-start" and len(argv) == 4:
             root = state_root(argv[1])

@@ -134,7 +134,7 @@ assert_meta_selection_reason() {
 }
 
 test_no_profile_keeps_claude_profile_defaults() {
-  local rec id out status expected launch
+  local rec id out status expected launch generation
   id=profile-off-z1
   rec=$(make_spawn_case profile-off claude "$id")
   read_case_record "$rec"
@@ -147,10 +147,15 @@ test_no_profile_keeps_claude_profile_defaults() {
   assert_meta_selection_reason "$HOME_DIR/state/$id.meta" unavailable
 
   launch=$(cat "$LAUNCH_LOG")
-  expected=". '/tmp/fm-$id/claude-telemetry.env' && CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions \"\$('${ROOT}/bin/fm-operational-input.sh' encode launch-brief < '$HOME_DIR/data/$id/brief.md')\""
+  expected="[ -r '/tmp/fm-$id/claude-telemetry.env' ] && . '/tmp/fm-$id/claude-telemetry.env'; CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions \"\$('${ROOT}/bin/fm-operational-input.sh' encode launch-brief < '$HOME_DIR/data/$id/brief.md')\""
   [ "$launch" = "$expected" ] || fail "no-profile claude launch did not use the canonical launch kind"$'\n'"expected: $expected"$'\n'"actual:   $launch"
+  assert_no_grep "claude-telemetry.env' && " "$LAUNCH_LOG" "telemetry env sourcing gates the claude launch"
   assert_present "$HOME_DIR/state/$id.telemetry.json" "Claude spawn did not initialize private telemetry"
   assert_grep '"statusLine"' "$WT_DIR/.claude/settings.local.json" "Claude spawn did not merge the official status-line producer"
+  generation=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["generation"])' \
+    "$HOME_DIR/state/$id.telemetry.json")
+  assert_grep "status '$id' '$generation'" "$WT_DIR/.claude/settings.local.json" \
+    "Claude status line is not bound to this launch generation"
   assert_grep "OTEL_LOG_RAW_API_BODIES='0'" "/tmp/fm-$id/claude-telemetry.env" "Claude spawn did not pin raw API bodies off"
   pass "no --model/--effort records defaults and types the claude launch instructions"
 }
@@ -382,8 +387,10 @@ test_pi_threads_model_and_max_effort() {
     "pi launch still exports the removed Calm input-reroute binding"
   assert_contains "$launch" "fm-operational-input.sh' encode launch-brief" \
     "pi launch lost the canonical typed launch-brief envelope"
-  assert_grep 'pi.on("message_end"' "$HOME_DIR/state/$id.pi-ext.ts" \
+  assert_grep 'project("message_end"' "$HOME_DIR/state/$id.pi-ext.ts" \
     "Pi spawn did not generate the finalized-usage producer"
+  assert_grep 'pi.on("turn_end"' "$HOME_DIR/state/$id.pi-ext.ts" \
+    "Pi spawn did not keep the established turn-end signal on the direct registration path"
   assert_no_grep 'message.content' "$HOME_DIR/state/$id.pi-ext.ts" \
     "Pi spawn generated a content-reading extension"
   assert_present "$HOME_DIR/state/$id.telemetry.json" "Pi spawn did not initialize private telemetry"

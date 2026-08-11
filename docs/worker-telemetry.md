@@ -114,6 +114,7 @@ A producer error, collector error, malformed event, write failure, heartbeat fai
 
 Every newly launched non-secondmate Pi worker receives the existing task-scoped generated extension outside the project copy.
 The extension retains the established `turn_end` signal and adds only model and usage projection.
+The `turn_end` registration comes first and each projection registration and handler is isolated, so a rejected event name or a malformed event payload can never cost the worker its turn-end signal.
 It reads the resolved `ctx.model`, `model_select.model`, and finalized assistant message `provider`, `model`, and `usage` fields.
 It never reads message content, tool arguments, tool results, context files, the Pi session file, or session history.
 
@@ -121,13 +122,17 @@ The writer adds finalized `usage.input`, `usage.output`, `usage.cacheRead`, `usa
 A model switch updates the displayed provider/model without resetting cumulative usage.
 A malformed or overflowing usage observation changes coverage to partial rather than emitting an estimate.
 The writer emits a 30-second heartbeat and a final observation on Pi session shutdown.
+It stages each write at one task-scoped owner-only name beside the record, so an interrupted write leaves at most one leftover that normal task cleanup removes by exact name.
 
 ## Claude producer
 
 Claude telemetry is enabled for a newly launched non-secondmate worker only when the built-in privacy self-test passes and a task-scoped loopback collector starts successfully.
 Otherwise Claude launches normally and worker telemetry remains unavailable.
+The launch sources that environment only when it is readable at launch time and never conditions the worker command on that read.
+A start that cannot publish its launch environment retires its own collector rather than leaving it running.
 
 The official Claude status-line JSON is the idle/startup model source.
+A status-line update is applied only for a valid task ID whose record carries the Claude harness and the exact generation that launch bound into the status-line command.
 The official Claude Code OTel `claude_code.api_request` log event is the cumulative token source.
 Provider identity comes from an explicit official Bedrock, Vertex, or Foundry launch mode, or from an allowlisted projection of official `claude auth status` under the launch environment.
 Raw authentication output is discarded and never reaches a writer record.
@@ -157,6 +162,8 @@ Usage from main, subagent, compaction, and auxiliary requests contributes to the
 Only a main-query event or official status-line update may select the displayed model.
 A malformed, rejected, or overflowing usage observation changes coverage to `since_observed` for the remaining life of that collector, so a later valid event never restores `full_worker`.
 A status-line update that repeats the already recorded model leaves the record untouched, because the collector heartbeat rather than the status line owns freshness.
+The collector heartbeats only while that worker's own status-line render or exporter request proved liveness within the last 120 seconds, so a running idle worker stays fresh and a record ages to stale after its Claude worker exits.
+Liveness is a task-scoped owner-only marker beside the record; it carries no payload, is never projected, and is removed with the rest of that task's telemetry.
 
 Collector cleanup validates the owner-only control record, task ID, PID, process start instant, executable script, state root, and exact collector arguments before signaling.
 It waits a bounded interval after TERM and uses KILL only after the same complete process identity is revalidated.
@@ -308,7 +315,7 @@ A manual snapshot can never claim official or fresh provenance.
 
 ## Retention and browser boundary
 
-Task cleanup removes only that task's generated Pi extension, writer record, writer lock, owner-only Claude launch environment, and identity-validated collector.
+Task cleanup removes only that task's generated Pi extension, writer record, writer lock, writer staging leftover, liveness marker, owner-only Claude launch environment, and identity-validated collector.
 Plan cache state is home-local and contains only the normalized provider record.
 No raw Pi event, Claude status payload, OTel batch, Codex app-server line, authentication object, account identity, session/thread/request identifier, prompt, response, tool content, terminal content, credential, path, command, cost, or raw log is persisted by this feature.
 

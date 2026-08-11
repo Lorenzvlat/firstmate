@@ -164,6 +164,69 @@ JS
   pass "Pi projects exact resolved model and finalized token components without content access"
 }
 
+test_pi_turn_end_survives_telemetry_registration_and_payload_failures() {
+  local state generation plugin staging out
+  state="$TMP_ROOT/pi-passive/state"
+  mkdir -p "$state"
+  make_meta "$state" pi-x2 pi
+  generation=$(FM_STATE_OVERRIDE="$state" "$INIT" pi-x2 pi) || fail "passive Pi fixture init failed"
+  plugin="$state/pi-x2.pi-ext.ts"
+  staging="$state/.pi-x2.telemetry.json.tmp"
+  FM_STATE_OVERRIDE="$state" "$PI_GENERATOR" \
+    pi-x2 "$generation" "$state/pi-x2.turn-ended" "$state/pi-x2.telemetry.json" "$plugin" \
+    || fail "passive Pi extension generation failed"
+  printf 'leftover staging content\n' > "$staging"
+
+  out=$(PLUGIN="$plugin" RECORD="$state/pi-x2.telemetry.json" TURNEND="$state/pi-x2.turn-ended" \
+    STAGING="$staging" node --input-type=module <<'JS'
+import { existsSync, readFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+const extension = await import(pathToFileURL(process.env.PLUGIN).href);
+
+// A Pi build that rejects every event this launch did not already rely on.
+const rejecting = new Map();
+let registrationThrew = false;
+try {
+  extension.default({ on(name, handler) {
+    if (name !== "turn_end") throw new Error("unsupported event");
+    rejecting.set(name, handler);
+  } });
+} catch {
+  registrationThrew = true;
+}
+await rejecting.get("turn_end")?.();
+await new Promise((resolve) => setTimeout(resolve, 100));
+
+const handlers = new Map();
+extension.default({ on(name, handler) { handlers.set(name, handler); } });
+let dispatchThrew = false;
+try {
+  await handlers.get("session_start")({}, undefined);
+  await handlers.get("model_select")({});
+  await handlers.get("message_end")({});
+  await handlers.get("message_end")({ message: { role: "assistant" } });
+} catch {
+  dispatchThrew = true;
+}
+await handlers.get("message_end")({ message: { role: "assistant", provider: "anthropic", model: "claude-sonnet-4-5", usage: { input: 1, output: 2, cacheRead: 3, cacheWrite: 4, totalTokens: 10 } } });
+console.log(JSON.stringify({
+  registrationThrew,
+  dispatchThrew,
+  turnEndSignaled: existsSync(process.env.TURNEND),
+  turnEndRegistered: rejecting.has("turn_end"),
+  stagingLeftover: existsSync(process.env.STAGING),
+  record: JSON.parse(readFileSync(process.env.RECORD, "utf8")),
+}));
+JS
+  ) || fail "passive Pi extension fixture failed"
+  json_assert "$out" 'value["registrationThrew"] is False and value["turnEndRegistered"] is True'
+  json_assert "$out" 'value["turnEndSignaled"] is True'
+  json_assert "$out" 'value["dispatchThrew"] is False'
+  json_assert "$out" 'value["stagingLeftover"] is False'
+  json_assert "$out" 'value["record"]["tokens"]["total"] == 10 and value["record"]["status"] == "partial"'
+  pass "Pi turn-end signaling survives a rejected telemetry registration, malformed payloads, and staging leftovers"
+}
+
 make_fake_claude() { # <dir>
   local fakebin=$1
   mkdir -p "$fakebin"
@@ -179,7 +242,7 @@ SH
 }
 
 test_claude_loopback_allowlist_dedupe_and_cleanup() {
-  local root state tasktmp fakebin endpoint token out control_pid marker
+  local root state tasktmp fakebin endpoint token out control_pid marker generation
   root="$TMP_ROOT/claude"
   state="$root/state"
   tasktmp="$root/tasktmp"
@@ -187,7 +250,7 @@ test_claude_loopback_allowlist_dedupe_and_cleanup() {
   mkdir -p "$state" "$tasktmp"
   make_fake_claude "$fakebin"
   make_meta "$state" claude-x1 claude
-  FM_STATE_OVERRIDE="$state" "$INIT" claude-x1 claude >/dev/null || fail "Claude telemetry init failed"
+  generation=$(FM_STATE_OVERRIDE="$state" "$INIT" claude-x1 claude) || fail "Claude telemetry init failed"
   PATH="$fakebin:$BASE_PATH" FM_STATE_OVERRIDE="$state" "$CLAUDE" self-test \
     || fail "Claude privacy self-test failed"
   PATH="$fakebin:$BASE_PATH" FM_STATE_OVERRIDE="$state" "$CLAUDE" \
@@ -267,7 +330,8 @@ connection.close()
 PY
 
   printf '%s' '{"model":{"id":"claude-opus-4"}}' \
-    | FM_STATE_OVERRIDE="$state" "$CLAUDE" status claude-x1
+    | FM_STATE_OVERRIDE="$state" "$CLAUDE" status claude-x1 "$generation"
+  assert_present "$state/.claude-x1.claude-live" "Claude worker liveness was never recorded"
   out=$(FM_STATE_OVERRIDE="$state" "$SNAPSHOT" --json) || fail "Claude worker snapshot failed"
   json_assert "$out" 'value["workers"][0]["model"] == {"provider":"anthropic","id":"claude-opus-4"}'
   json_assert "$out" 'value["workers"][0]["tokens"] == {"input":6,"output":8,"cacheRead":10,"cacheWrite":12,"reasoningOutput":None,"total":36,"totalSemantics":"sum_of_disjoint_components"}'
@@ -279,6 +343,7 @@ PY
   FM_STATE_OVERRIDE="$state" "$CLAUDE" stop claude-x1
   [ ! -e "$state/claude-x1.telemetry.json" ] || fail "Claude stop retained telemetry record"
   [ ! -e "$state/claude-x1.claude-telemetry.json" ] || fail "Claude stop retained collector control"
+  [ ! -e "$state/.claude-x1.claude-live" ] || fail "Claude stop retained the worker liveness marker"
   sleep 0.1
   if kill -0 "$control_pid" 2>/dev/null; then
     fail "Claude stop did not retire its task-scoped collector"
@@ -395,27 +460,102 @@ PY
 }
 
 test_claude_status_line_skips_redundant_record_writes() {
-  local state record first second third out
+  local state record generation first second third fourth out
   state="$TMP_ROOT/statusline/state"
   mkdir -p "$state"
   record="$state/statusline-x1.telemetry.json"
   make_meta "$state" statusline-x1 claude
-  FM_STATE_OVERRIDE="$state" "$INIT" statusline-x1 claude >/dev/null \
+  generation=$(FM_STATE_OVERRIDE="$state" "$INIT" statusline-x1 claude) \
     || fail "status-line fixture init failed"
   printf '%s' '{"model":{"id":"claude-sonnet-4-5"}}' \
-    | FM_STATE_OVERRIDE="$state" "$CLAUDE" status statusline-x1
+    | FM_STATE_OVERRIDE="$state" "$CLAUDE" status statusline-x1 "$generation"
   first=$(stat -f '%i' "$record" 2>/dev/null || stat -c '%i' "$record")
   printf '%s' '{"model":{"id":"claude-sonnet-4-5"}}' \
-    | FM_STATE_OVERRIDE="$state" "$CLAUDE" status statusline-x1
+    | FM_STATE_OVERRIDE="$state" "$CLAUDE" status statusline-x1 "$generation"
   second=$(stat -f '%i' "$record" 2>/dev/null || stat -c '%i' "$record")
   [ "$first" = "$second" ] || fail "an unchanged status-line render rewrote the telemetry record"
   printf '%s' '{"model":{"id":"claude-opus-4"}}' \
-    | FM_STATE_OVERRIDE="$state" "$CLAUDE" status statusline-x1
+    | FM_STATE_OVERRIDE="$state" "$CLAUDE" status statusline-x1 "$generation"
   third=$(stat -f '%i' "$record" 2>/dev/null || stat -c '%i' "$record")
   [ "$second" != "$third" ] || fail "a changed status-line model did not update the telemetry record"
+  printf '%s' '{"model":{"id":"claude-haiku-4-5"}}' \
+    | FM_STATE_OVERRIDE="$state" "$CLAUDE" status statusline-x1 00000000000000000000000000000000
+  printf '%s' '{"model":{"id":"claude-haiku-4-5"}}' \
+    | FM_STATE_OVERRIDE="$state" "$CLAUDE" status ../statusline-x1 "$generation"
+  fourth=$(stat -f '%i' "$record" 2>/dev/null || stat -c '%i' "$record")
+  [ "$third" = "$fourth" ] || fail "a foreign generation or task id updated the telemetry record"
+  [ ! -e "$state/../.statusline-x1.telemetry.lock" ] \
+    || fail "an unvalidated status-line task id created a lock outside the state root"
   out=$(FM_STATE_OVERRIDE="$state" "$SNAPSHOT" --json) || fail "status-line worker snapshot failed"
   json_assert "$out" 'value["workers"][0]["model"] == {"provider":None,"id":"claude-opus-4"}'
-  pass "status-line renders update the record only when the projected model actually changes"
+  pass "status-line renders update the record only for this task, generation, and a changed model"
+}
+
+test_claude_freshness_follows_worker_liveness() {
+  local state generation out
+  state="$TMP_ROOT/liveness/state"
+  mkdir -p "$state"
+  make_meta "$state" live-x1 claude
+  generation=$(FM_STATE_OVERRIDE="$state" "$INIT" live-x1 claude) || fail "liveness fixture init failed"
+  out=$(FM_TELEMETRY_STATE="$state" FM_TELEMETRY_MODULE="$ROOT/bin/telemetry/fm-telemetry.py" \
+    FM_TELEMETRY_GENERATION="$generation" python3 - <<'PY'
+import importlib.util, json, os, time
+
+spec = importlib.util.spec_from_file_location("fm_telemetry", os.environ["FM_TELEMETRY_MODULE"])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+root = module.state_root(os.environ["FM_TELEMETRY_STATE"])
+generation = os.environ["FM_TELEMETRY_GENERATION"]
+usage = {"usage": dict(zip(("input", "output", "cacheRead", "cacheWrite"), (1, 2, 3, 4))),
+         "querySource": "main", "model": "claude-sonnet-4-5"}
+module.update_claude_usage(root, "live-x1", generation, "anthropic", usage, module.UsageCoverage())
+result = {"beforeAnyProof": module.heartbeat_tick(root, "live-x1", generation)}
+started = module.load_current_record(root, "live-x1")["observedAt"]
+
+module.note_worker_liveness(root, "live-x1")
+live = module.liveness_path(root, "live-x1")
+result["mode"] = oct(live.stat().st_mode & 0o777)
+time.sleep(0.02)
+result["whileRunning"] = module.heartbeat_tick(root, "live-x1", generation)
+result["advanced"] = module.load_current_record(root, "live-x1")["observedAt"] != started
+running = module.load_current_record(root, "live-x1")["observedAt"]
+
+exited = time.time() - module.WORKER_LIVENESS_WINDOW - 5
+os.utime(live, (exited, exited))
+result["afterExit"] = module.heartbeat_tick(root, "live-x1", generation)
+result["frozen"] = module.load_current_record(root, "live-x1")["observedAt"] == running
+print(json.dumps(result))
+PY
+  ) || fail "Claude liveness probe failed"
+  json_assert "$out" 'value["beforeAnyProof"] is False'
+  json_assert "$out" 'value["whileRunning"] is True and value["advanced"] is True'
+  json_assert "$out" 'value["afterExit"] is False and value["frozen"] is True'
+  json_assert "$out" 'value["mode"] == "0o600"'
+  out=$(FM_TELEMETRY_TEST_MODE=1 FM_TELEMETRY_TEST_NOW=4102444800 \
+    FM_STATE_OVERRIDE="$state" "$SNAPSHOT" --json) || fail "liveness worker snapshot failed"
+  json_assert "$out" 'value["workers"][0]["status"] == "stale"'
+  pass "Claude freshness tracks worker liveness and ages to stale after the worker stops proving it"
+}
+
+test_claude_start_leaves_no_orphan_collector() {
+  local root state fakebin out
+  root="$TMP_ROOT/claude-orphan"
+  state="$root/state"
+  fakebin="$root/fakebin"
+  mkdir -p "$state"
+  make_fake_claude "$fakebin"
+  make_meta "$state" orphan-x1 claude
+  FM_STATE_OVERRIDE="$state" "$INIT" orphan-x1 claude >/dev/null || fail "orphan fixture init failed"
+  if PATH="$fakebin:$BASE_PATH" FM_STATE_OVERRIDE="$state" "$CLAUDE" \
+       start orphan-x1 "$root/missing-dir/telemetry.env"; then
+    fail "Claude start reported success for an unpublishable launch environment"
+  fi
+  [ ! -e "$state/orphan-x1.claude-telemetry.json" ] \
+    || fail "a failed Claude start retained its collector control record"
+  sleep 0.2
+  out=$(ps -Ao command= | grep -F "claude-collector $state orphan-x1" | grep -v grep || true)
+  [ -z "$out" ] || fail "a failed Claude start left an orphan collector running"$'\n'"$out"
+  pass "a failed Claude start publishes no environment and leaves no orphan collector"
 }
 
 test_claude_stop_refuses_unrelated_process() {
@@ -450,8 +590,11 @@ PY
 test_snapshot_bounds_and_hostile_files
 test_snapshot_status_timestamp_and_integer_controls
 test_pi_projection_exact_usage_and_passive_failure
+test_pi_turn_end_survives_telemetry_registration_and_payload_failures
 test_claude_loopback_allowlist_dedupe_and_cleanup
 test_bounded_budgets_survive_slow_sources_and_lingering_pipes
 test_claude_usage_gap_downgrades_coverage_permanently
 test_claude_status_line_skips_redundant_record_writes
+test_claude_freshness_follows_worker_liveness
+test_claude_start_leaves_no_orphan_collector
 test_claude_stop_refuses_unrelated_process

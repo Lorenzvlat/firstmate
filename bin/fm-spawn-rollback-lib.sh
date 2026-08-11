@@ -19,7 +19,8 @@ fm_spawn_identity_rollback() { # <root> <home> <state> <task-id> <kind> <task-tm
     FM_STATE_OVERRIDE="$state" "$root/bin/fm-claude-telemetry.sh" stop "$id" >/dev/null 2>&1 || true
     rm -f "$state/$id.status" "$state/$id.turn-ended" \
       "$state/$id.pi-ext.ts" "$state/$id.telemetry.json" \
-      "$state/.$id.telemetry.lock" "$state/$id.claude-telemetry.json" \
+      "$state/.$id.telemetry.lock" "$state/.$id.telemetry.json.tmp" \
+      "$state/$id.claude-telemetry.json" \
       "$state/$id.herdr-nm-activity" "$meta"
     return 0
   fi

@@ -1366,7 +1366,7 @@ if [ "$KIND" != secondmate ]; then
       if [ -n "$TELEMETRY_GENERATION" ] \
          && FM_STATE_OVERRIDE="$STATE_REAL" "$FM_ROOT/bin/fm-claude-telemetry.sh" \
            start "$ID" "$CLAUDE_ENV_FILE" >/dev/null 2>&1; then
-        claude_status_command=$(json_escape "FM_STATE_OVERRIDE=$(shell_quote "$STATE_REAL") $(shell_quote "$FM_ROOT/bin/fm-claude-telemetry.sh") status $(shell_quote "$ID")")
+        claude_status_command=$(json_escape "FM_STATE_OVERRIDE=$(shell_quote "$STATE_REAL") $(shell_quote "$FM_ROOT/bin/fm-claude-telemetry.sh") status $(shell_quote "$ID") $(shell_quote "$TELEMETRY_GENERATION")")
         cat > "$WT/.claude/settings.local.json" <<EOF
 {"hooks":{"Stop":[{"hooks":[{"type":"command","command":"touch '$TURNEND'"}]}]},"statusLine":{"type":"command","command":"$claude_status_command"}}
 EOF
@@ -1547,7 +1547,9 @@ sq_piwatch=$(shell_quote "$PROJ_ABS/.pi/extensions/fm-primary-pi-watch.ts")
 sq_opinput=$(shell_quote "$FM_ROOT/bin/fm-operational-input.sh")
 CLAUDEENV=
 if [ -n "$CLAUDE_ENV_FILE" ] && [ -f "$CLAUDE_ENV_FILE" ] && [ ! -L "$CLAUDE_ENV_FILE" ]; then
-  CLAUDEENV=". $(shell_quote "$CLAUDE_ENV_FILE") && "
+  # Telemetry never gates the launch: an unreadable env file at launch time
+  # degrades to telemetry-off rather than to a worker that never starts.
+  CLAUDEENV="[ -r $(shell_quote "$CLAUDE_ENV_FILE") ] && . $(shell_quote "$CLAUDE_ENV_FILE"); "
 fi
 MODELFLAG=$(model_flag_for_harness "$HARNESS" "$MODEL")
 EFFORTFLAG=$(effort_flag_for_harness "$HARNESS" "$EFFORT")

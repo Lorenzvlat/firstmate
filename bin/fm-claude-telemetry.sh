@@ -5,7 +5,7 @@
 #
 # Usage:
 #   fm-claude-telemetry.sh start <task-id> <owner-only-env-file>
-#   fm-claude-telemetry.sh status <task-id>       # official status JSON on stdin
+#   fm-claude-telemetry.sh status <task-id> <generation>  # official status JSON on stdin
 #   fm-claude-telemetry.sh stop <task-id>
 #   fm-claude-telemetry.sh self-test
 set -eu
@@ -22,9 +22,9 @@ case "$ACTION:$#" in
     umask 077
     exec python3 "$SCRIPT_DIR/telemetry/fm-telemetry.py" claude-start "$STATE" "$2" "$3"
     ;;
-  status:2)
+  status:3)
     [ -d "$STATE" ] && [ ! -L "$STATE" ] || exit 0
-    python3 "$SCRIPT_DIR/telemetry/fm-telemetry.py" claude-status "$STATE" "$2" >/dev/null 2>&1 || true
+    python3 "$SCRIPT_DIR/telemetry/fm-telemetry.py" claude-status "$STATE" "$2" "$3" >/dev/null 2>&1 || true
     exit 0
     ;;
   stop:2)

@@ -32,22 +32,27 @@ Command:
 bin/fm-test-run.sh tests/fm-worker-telemetry.test.sh
 ```
 
-Exact focused result on 2026-08-06 after the bounded-budget, coverage, and enforcing-assertion fixes:
+Exact focused result on 2026-08-11 after the passive-failure, liveness, generation, and orphan-collector fixes:
 
 ```text
 ok - worker snapshot bounds count, bytes, owner mode, symlinks, and generic warning enums
 ok - worker snapshot distinguishes status/integer controls and projects only fixed selection rationale labels
 ok - Pi projects exact resolved model and finalized token components without content access
+ok - Pi turn-end signaling survives a rejected telemetry registration, malformed payloads, and staging leftovers
 ok - Claude collector is loopback-only, privacy-pinned, deduplicated, allowlisted, and task-scoped
 ok - snapshot deadline is never absorbed by a projection handler and a bounded command never waits on an inherited pipe
 ok - Claude uncounted usage downgrades coverage once and never restores full_worker
-ok - status-line renders update the record only when the projected model actually changes
+ok - status-line renders update the record only for this task, generation, and a changed model
+ok - Claude freshness tracks worker liveness and ages to stale after the worker stops proving it
+ok - a failed Claude start publishes no environment and leaves no orphan collector
 ok - Claude stop refuses an unrelated process even when a private control record names its PID
 FM_TEST_SUMMARY total=1 failed=0 skipped_gate=0
 ```
 
 The bounded-budget fixture holds the snapshot's record reader for 30 seconds and confirms the 3-second deadline still returns the empty bounded projection, and it runs a bounded command whose exited child leaves a 30-second grandchild holding the stdout pipe, confirming the reader returns immediately instead of blocking past its budget.
 The coverage fixture drops one admitted observation, then feeds a valid one, and confirms the record stays `partial`/`since_observed` while still summing the counted tokens.
+The passive-failure fixture loads the generated extension under a Pi stub that throws for every event other than `turn_end`, confirms the export still loads and still signals turn end, dispatches empty and usage-free payloads without a throw, and confirms one pre-existing staging leftover is replaced rather than accumulated.
+The liveness fixture confirms the collector heartbeat refuses to advance `observedAt` before any liveness proof and after a proof older than the 120-second window, and that the record then projects as `stale`.
 Both suites' JSON assertions now fail the run rather than only printing to stderr.
 
 The generated-extension fixture also asserts that the extension source contains neither `message.content` nor `sessionManager` access.
@@ -67,7 +72,8 @@ OTEL_LOG_TOOL_DETAILS='0'
 OTEL_LOG_RAW_API_BODIES='0'
 ```
 
-The collector cleanup test records its task PID, invokes the fixed stop helper, and verifies both process absence and removal of only that task's control and summary records.
+The collector cleanup test records its task PID, invokes the fixed stop helper, and verifies both process absence and removal of only that task's control, liveness, and summary records.
+A separate start test points the launch environment at an unpublishable location and confirms the failed start reports failure, publishes nothing, retires its own collector, and leaves no control record behind.
 
 ## Codex worker transport refusal
 
