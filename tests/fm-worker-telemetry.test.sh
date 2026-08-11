@@ -634,6 +634,51 @@ PY
   pass "Claude stop refuses an unrelated process even when a private control record names its PID"
 }
 
+test_a_finished_suite_leaves_no_collector_behind() {
+  local root fakebin child out pid tmproot
+  root="$TMP_ROOT/suite-cleanup"
+  fakebin="$root/fakebin"
+  child="$root/child-suite.sh"
+  mkdir -p "$root"
+  make_fake_claude "$fakebin"
+
+  # A behavior suite that starts a task-scoped collector and then ends: the
+  # collector only exits on an explicit stop, so tests/lib.sh must retire it and
+  # remove the registered temp root when the suite process exits.
+  cat > "$child" <<CHILD
+#!/usr/bin/env bash
+set -u
+. "$ROOT/tests/lib.sh"
+tmproot=\$(fm_test_tmproot fm-suite-cleanup-probe)
+mkdir -p "\$tmproot/state" "\$tmproot/tasktmp"
+printf 'harness=claude\nkind=ship\n' > "\$tmproot/state/childz1.meta"
+FM_STATE_OVERRIDE="\$tmproot/state" "$ROOT/bin/fm-worker-telemetry-init.sh" childz1 claude >/dev/null || exit 1
+PATH="$fakebin:$BASE_PATH" FM_STATE_OVERRIDE="\$tmproot/state" \\
+  "$ROOT/bin/fm-claude-telemetry.sh" start childz1 "\$tmproot/tasktmp/telemetry.env" || exit 1
+python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["pid"])' \\
+  "\$tmproot/state/childz1.claude-telemetry.json" || exit 1
+printf '%s\n' "\$tmproot"
+CHILD
+  chmod +x "$child"
+
+  out=$(bash "$child") || fail "suite-cleanup probe failed to start a collector"
+  pid=$(printf '%s\n' "$out" | sed -n 1p)
+  tmproot=$(printf '%s\n' "$out" | sed -n 2p)
+  case "$pid" in ''|*[!0-9]*) fail "suite-cleanup probe did not report a collector pid" ;; esac
+
+  local waited=0
+  while kill -0 "$pid" 2>/dev/null && [ "$waited" -lt 30 ]; do
+    sleep 0.1
+    waited=$((waited + 1))
+  done
+  if kill -0 "$pid" 2>/dev/null; then
+    kill -9 "$pid" 2>/dev/null || true
+    fail "a finished suite left its task-scoped collector running"
+  fi
+  [ ! -d "$tmproot" ] || fail "a finished suite left its registered temp root behind"
+  pass "a finished suite retires its task-scoped collector and removes its temp root"
+}
+
 test_snapshot_bounds_and_hostile_files
 test_snapshot_status_timestamp_and_integer_controls
 test_pi_projection_exact_usage_and_passive_failure
@@ -646,3 +691,4 @@ test_claude_freshness_follows_worker_liveness
 test_claude_start_leaves_no_orphan_collector
 test_every_task_scoped_file_is_in_the_fixed_cleanup_lists
 test_claude_stop_refuses_unrelated_process
+test_a_finished_suite_leaves_no_collector_behind

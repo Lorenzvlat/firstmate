@@ -26,6 +26,15 @@ test_script_parses() {
   out=$(bash -n "$ROOT/bin/fm-brief.sh" 2>&1); rc=$?
   expect_code 0 "$rc" "bash -n bin/fm-brief.sh must parse cleanly (got: $out)"
   [ -z "$out" ] || fail "bash -n bin/fm-brief.sh emitted unexpected output: $out"
+  # Only bash 3.2 (the macOS system bash) actually mis-parses the apostrophe, so
+  # `bash -n` alone lets the regression through on a newer bash. Check the
+  # offending pattern directly instead, whatever bash runs this suite.
+  out=$(awk '
+    /=\$\(cat <<'"'"'?EOF'"'"'?$/ { inbody = 1; next }
+    inbody && $0 == "EOF" { inbody = 0; next }
+    inbody && index($0, "'"'"'") { print FILENAME ":" FNR ": " $0 }
+  ' "$ROOT/bin/fm-brief.sh")
+  [ -z "$out" ] || fail "apostrophe inside a \$(cat <<EOF) body breaks bash 3.2 parsing of the whole file: $out"
   pass "fm-brief.sh: bash -n succeeds"
 }
 

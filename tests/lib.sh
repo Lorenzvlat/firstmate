@@ -59,20 +59,49 @@ pass() {
 
 FM_TEST_CLEANUP_DIRS=()
 
+# A temp root is almost always taken as `TMP_ROOT=$(fm_test_tmproot ...)`, so the
+# array append below lands in a command-substitution subshell and the sourcing
+# shell never sees it - which is also where the EXIT trap used to be installed,
+# so it fired on that subshell instead of on the suite. Registered roots are
+# therefore recorded in this file, which outlives the subshell, and the trap is
+# installed here in the sourcing shell (bash does not inherit an EXIT trap into a
+# subshell, so only the suite itself ever cleans up).
+#
+# Cleanup retires task-scoped Claude telemetry collectors before removing the
+# roots: a suite that drives the real fm-spawn with a claude harness starts one
+# per worker, and a collector exits only on the explicit stop that
+# teardown/rollback issues, so deleting the state directory alone would leave a
+# live loopback listener behind after the suite ends.
+FM_TEST_CLEANUP_REGISTRY=$(mktemp "${TMPDIR:-/tmp}/fm-test-cleanup.XXXXXX")
+
 fm_test_cleanup() {
-  local d
+  local d control id
+  [ -f "$FM_TEST_CLEANUP_REGISTRY" ] || return 0
+  while IFS= read -r d; do
+    [ -n "$d" ] && [ -d "$d" ] || continue
+    while IFS= read -r -d '' control; do
+      id=$(basename "$control" .claude-telemetry.json)
+      FM_STATE_OVERRIDE="$(dirname "$control")" \
+        "$ROOT/bin/fm-claude-telemetry.sh" stop "$id" >/dev/null 2>&1 || true
+    done < <(find "$d" -type f -name '*.claude-telemetry.json' -print0 2>/dev/null)
+  done < "$FM_TEST_CLEANUP_REGISTRY"
+  while IFS= read -r d; do
+    [ -n "$d" ] && rm -rf "$d"
+  done < "$FM_TEST_CLEANUP_REGISTRY"
   for d in "${FM_TEST_CLEANUP_DIRS[@]:-}"; do
     [ -n "$d" ] && rm -rf "$d"
   done
+  rm -f "$FM_TEST_CLEANUP_REGISTRY"
+  return 0
 }
+
+trap fm_test_cleanup EXIT
 
 fm_test_tmproot() {
   local prefix=${1:-fm-test} root
   root=$(mktemp -d "${TMPDIR:-/tmp}/${prefix}.XXXXXX")
-  if [ "${#FM_TEST_CLEANUP_DIRS[@]}" -eq 0 ]; then
-    trap fm_test_cleanup EXIT
-  fi
   FM_TEST_CLEANUP_DIRS+=("$root")
+  printf '%s\n' "$root" >> "$FM_TEST_CLEANUP_REGISTRY"
   printf '%s\n' "$root"
 }
 

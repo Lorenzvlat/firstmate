@@ -47,6 +47,7 @@ ok - Claude freshness tracks observed worker activity and ages to stale once tha
 ok - a failed Claude start publishes no environment and leaves no orphan collector
 ok - every task-scoped telemetry file is removed by name by each fixed cleanup list
 ok - Claude stop refuses an unrelated process even when a private control record names its PID
+ok - a finished suite retires its task-scoped collector and removes its temp root
 FM_TEST_SUMMARY total=1 failed=0 skipped_gate=0
 ```
 
@@ -55,6 +56,7 @@ The coverage fixture drops one admitted observation, then feeds a valid one, and
 The passive-failure fixture loads the generated extension under a Pi stub that throws for every event other than `turn_end`, confirms the export still loads and still signals turn end, dispatches empty and usage-free payloads without a throw, and confirms one pre-existing staging leftover is replaced rather than accumulated.
 The freshness fixture confirms the collector heartbeat refuses to advance `observedAt` before any recorded worker activity and after activity older than the 120-second window, and that the record then projects as `stale`.
 No claim is made here about Claude's idle status-line cadence, because that cadence was not observed on this installation; the contract therefore describes freshness in terms of observed authenticated exporter and status-line activity only.
+The suite-cleanup fixture runs a child behavior suite that starts a real task-scoped collector and then exits, and requires that the collector process is gone and the registered temp root removed once that suite ends, because a collector exits only on an explicit stop.
 The fixed-cleanup fixture derives every task-scoped file name from the telemetry module and the generated Pi extension itself, then requires each name to appear in the teardown, child-teardown, and spawn-rollback removal lists, so a new task-scoped file cannot be added without its cleanup entry.
 Both suites' JSON assertions now fail the run rather than only printing to stderr.
 
