@@ -32,7 +32,7 @@ Command:
 bin/fm-test-run.sh tests/fm-worker-telemetry.test.sh
 ```
 
-Exact focused result on 2026-08-11 after the passive-failure, liveness, generation, and orphan-collector fixes:
+Exact focused result on 2026-08-11 after the passive-failure, activity-based freshness, generation, orphan-collector, and fixed-cleanup fixes:
 
 ```text
 ok - worker snapshot bounds count, bytes, owner mode, symlinks, and generic warning enums
@@ -43,8 +43,9 @@ ok - Claude collector is loopback-only, privacy-pinned, deduplicated, allowliste
 ok - snapshot deadline is never absorbed by a projection handler and a bounded command never waits on an inherited pipe
 ok - Claude uncounted usage downgrades coverage once and never restores full_worker
 ok - status-line renders update the record only for this task, generation, and a changed model
-ok - Claude freshness tracks worker liveness and ages to stale after the worker stops proving it
+ok - Claude freshness tracks observed worker activity and ages to stale once that activity stops
 ok - a failed Claude start publishes no environment and leaves no orphan collector
+ok - every task-scoped telemetry file is removed by name by each fixed cleanup list
 ok - Claude stop refuses an unrelated process even when a private control record names its PID
 FM_TEST_SUMMARY total=1 failed=0 skipped_gate=0
 ```
@@ -52,7 +53,9 @@ FM_TEST_SUMMARY total=1 failed=0 skipped_gate=0
 The bounded-budget fixture holds the snapshot's record reader for 30 seconds and confirms the 3-second deadline still returns the empty bounded projection, and it runs a bounded command whose exited child leaves a 30-second grandchild holding the stdout pipe, confirming the reader returns immediately instead of blocking past its budget.
 The coverage fixture drops one admitted observation, then feeds a valid one, and confirms the record stays `partial`/`since_observed` while still summing the counted tokens.
 The passive-failure fixture loads the generated extension under a Pi stub that throws for every event other than `turn_end`, confirms the export still loads and still signals turn end, dispatches empty and usage-free payloads without a throw, and confirms one pre-existing staging leftover is replaced rather than accumulated.
-The liveness fixture confirms the collector heartbeat refuses to advance `observedAt` before any liveness proof and after a proof older than the 120-second window, and that the record then projects as `stale`.
+The freshness fixture confirms the collector heartbeat refuses to advance `observedAt` before any recorded worker activity and after activity older than the 120-second window, and that the record then projects as `stale`.
+No claim is made here about Claude's idle status-line cadence, because that cadence was not observed on this installation; the contract therefore describes freshness in terms of observed authenticated exporter and status-line activity only.
+The fixed-cleanup fixture derives every task-scoped file name from the telemetry module and the generated Pi extension itself, then requires each name to appear in the teardown, child-teardown, and spawn-rollback removal lists, so a new task-scoped file cannot be added without its cleanup entry.
 Both suites' JSON assertions now fail the run rather than only printing to stderr.
 
 The generated-extension fixture also asserts that the extension source contains neither `message.content` nor `sessionManager` access.
@@ -72,7 +75,7 @@ OTEL_LOG_TOOL_DETAILS='0'
 OTEL_LOG_RAW_API_BODIES='0'
 ```
 
-The collector cleanup test records its task PID, invokes the fixed stop helper, and verifies both process absence and removal of only that task's control, liveness, and summary records.
+The collector cleanup test records its task PID, invokes the fixed stop helper, and verifies both process absence and removal of only that task's control, activity, and summary records.
 A separate start test points the launch environment at an unpublishable location and confirms the failed start reports failure, publishes nothing, retires its own collector, and leaves no control record behind.
 
 ## Codex worker transport refusal

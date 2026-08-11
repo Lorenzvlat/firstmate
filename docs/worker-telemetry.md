@@ -90,6 +90,7 @@ A source-reported zero remains available zero.
 The source total is not recomputed when the harness reports its own total because cached and reasoning tokens may be subsets rather than disjoint components.
 
 A live non-final observation becomes stale after 90 seconds without a writer heartbeat.
+`stale` means only that no writer heartbeat arrived inside that window; it never asserts that the worker process exited.
 A writer-confirmed final observation does not age into stale.
 A writer that observed the worker from launch uses `full_worker`.
 A writer that missed any earlier usage uses `since_observed`, and consumers must label those values as usage since telemetry began.
@@ -162,8 +163,10 @@ Usage from main, subagent, compaction, and auxiliary requests contributes to the
 Only a main-query event or official status-line update may select the displayed model.
 A malformed, rejected, or overflowing usage observation changes coverage to `since_observed` for the remaining life of that collector, so a later valid event never restores `full_worker`.
 A status-line update that repeats the already recorded model leaves the record untouched, because the collector heartbeat rather than the status line owns freshness.
-The collector heartbeats only while that worker's own status-line render or exporter request proved liveness within the last 120 seconds, so a running idle worker stays fresh and a record ages to stale after its Claude worker exits.
-Liveness is a task-scoped owner-only marker beside the record; it carries no payload, is never projected, and is removed with the rest of that task's telemetry.
+Claude freshness is activity-based rather than process-based.
+The collector heartbeats only while that worker's own authenticated exporter request or status-line render arrived within the last 120 seconds, so a Claude record stays fresh through continued worker activity and ages to stale roughly two to three and a half minutes after the last such activity.
+A Claude worker that is alive but idle therefore reads stale, and Firstmate deliberately tracks no Claude process lifecycle to distinguish the two.
+Activity is recorded as a task-scoped owner-only marker beside the record; it carries no payload, is never projected, and is removed with the rest of that task's telemetry.
 
 Collector cleanup validates the owner-only control record, task ID, PID, process start instant, executable script, state root, and exact collector arguments before signaling.
 It waits a bounded interval after TERM and uses KILL only after the same complete process identity is revalidated.
@@ -315,7 +318,8 @@ A manual snapshot can never claim official or fresh provenance.
 
 ## Retention and browser boundary
 
-Task cleanup removes only that task's generated Pi extension, writer record, writer lock, writer staging leftover, liveness marker, owner-only Claude launch environment, and identity-validated collector.
+Task cleanup removes only that task's generated Pi extension, writer record, writer lock, writer staging leftover, Claude activity marker, Claude collector handshake files, owner-only Claude launch environment, and identity-validated collector.
+The fixed removal list is applied by name even when the telemetry helper itself cannot run, so no task-scoped telemetry file outlives its task.
 Plan cache state is home-local and contains only the normalized provider record.
 No raw Pi event, Claude status payload, OTel batch, Codex app-server line, authentication object, account identity, session/thread/request identifier, prompt, response, tool content, terminal content, credential, path, command, cost, or raw log is persisted by this feature.
 

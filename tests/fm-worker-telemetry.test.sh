@@ -534,7 +534,7 @@ PY
   out=$(FM_TELEMETRY_TEST_MODE=1 FM_TELEMETRY_TEST_NOW=4102444800 \
     FM_STATE_OVERRIDE="$state" "$SNAPSHOT" --json) || fail "liveness worker snapshot failed"
   json_assert "$out" 'value["workers"][0]["status"] == "stale"'
-  pass "Claude freshness tracks worker liveness and ages to stale after the worker stops proving it"
+  pass "Claude freshness tracks observed worker activity and ages to stale once that activity stops"
 }
 
 test_claude_start_leaves_no_orphan_collector() {
@@ -556,6 +556,53 @@ test_claude_start_leaves_no_orphan_collector() {
   out=$(ps -Ao command= | grep -F "claude-collector $state orphan-x1" | grep -v grep || true)
   [ -z "$out" ] || fail "a failed Claude start left an orphan collector running"$'\n'"$out"
   pass "a failed Claude start publishes no environment and leaves no orphan collector"
+}
+
+test_every_task_scoped_file_is_in_the_fixed_cleanup_lists() {
+  local state generation plugin missing status
+  state="$TMP_ROOT/cleanup-names/state"
+  mkdir -p "$state"
+  make_meta "$state" cleanup-x1 pi
+  generation=$(FM_STATE_OVERRIDE="$state" "$INIT" cleanup-x1 pi) || fail "cleanup-name fixture init failed"
+  plugin="$state/cleanup-x1.pi-ext.ts"
+  FM_STATE_OVERRIDE="$state" "$PI_GENERATOR" \
+    cleanup-x1 "$generation" "$state/cleanup-x1.turn-ended" "$state/cleanup-x1.telemetry.json" "$plugin" \
+    || fail "cleanup-name extension generation failed"
+  missing=$(FM_TELEMETRY_MODULE="$ROOT/bin/telemetry/fm-telemetry.py" PLUGIN="$plugin" \
+    TEARDOWN="$ROOT/bin/fm-teardown.sh" ROLLBACK="$ROOT/bin/fm-spawn-rollback-lib.sh" python3 - <<'PY'
+import os, re
+from pathlib import Path
+
+module = Path(os.environ["FM_TELEMETRY_MODULE"]).read_text(encoding="utf-8")
+names = {name for name in re.findall(r'root / f"([^"]*\{task_id\}[^"]*)"', module)}
+staging = re.search(r'const STAGING = "([^"]+)"', Path(os.environ["PLUGIN"]).read_text(encoding="utf-8"))
+if staging is None:
+    raise SystemExit("generated Pi extension exposes no staging path")
+names.add(Path(staging.group(1)).name.replace("cleanup-x1", "{task_id}"))
+
+targets = [
+    (os.environ["TEARDOWN"], "$STATE", "$ID"),
+    (os.environ["TEARDOWN"], "$sub_state", "$child_id"),
+    (os.environ["ROLLBACK"], "$state", "$id"),
+]
+report = []
+for path, root, variable in targets:
+    source = Path(path).read_text(encoding="utf-8")
+    for name in sorted(names):
+        token = f'"{root}/{name.replace("{task_id}", variable)}"'
+        if token not in source:
+            report.append(f"{Path(path).name} {token}")
+print("\n".join(report))
+PY
+  ) || fail "cleanup-name derivation failed"
+  [ -z "$missing" ] \
+    || fail "task-scoped telemetry files are absent from a fixed cleanup list"$'\n'"$missing"
+  python3 "$ROOT/bin/telemetry/fm-telemetry.py" cleanup "$state" cleanup-x1 >/dev/null 2>&1
+  status=$?
+  [ "$status" = 2 ] || fail "the retired duplicate cleanup action still dispatches (exit $status)"
+  [ -e "$state/cleanup-x1.telemetry.json" ] \
+    || fail "the retired duplicate cleanup action still removed the telemetry record"
+  pass "every task-scoped telemetry file is removed by name by each fixed cleanup list"
 }
 
 test_claude_stop_refuses_unrelated_process() {
@@ -597,4 +644,5 @@ test_claude_usage_gap_downgrades_coverage_permanently
 test_claude_status_line_skips_redundant_record_writes
 test_claude_freshness_follows_worker_liveness
 test_claude_start_leaves_no_orphan_collector
+test_every_task_scoped_file_is_in_the_fixed_cleanup_lists
 test_claude_stop_refuses_unrelated_process

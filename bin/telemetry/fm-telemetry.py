@@ -33,9 +33,9 @@ from typing import Any
 MAX_SAFE_INTEGER = 9_007_199_254_740_991
 TASK_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$", re.ASCII)
 GENERATION_RE = re.compile(r"^[a-f0-9]{32}$", re.ASCII)
-# A Claude worker proves it is still running by rendering its own status line or
-# by exporting to its own collector. Freshness may outlive the last such proof
-# by at most this many seconds, so a record ages to stale after the worker exits.
+# Claude freshness is activity-based: a worker's own authenticated export or
+# status-line render is the only observed activity. Freshness may outlive the
+# last such activity by at most this many seconds, never by process lifecycle.
 WORKER_LIVENESS_WINDOW = 120.0
 PROVIDER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:+/-]{0,39}$", re.ASCII)
 MODEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:+/-]{0,119}$", re.ASCII)
@@ -304,7 +304,7 @@ def liveness_path(root: Path, task_id: str) -> Path:
 
 
 def note_worker_liveness(root: Path, task_id: str) -> None:
-    """Record that this task's own Claude worker just proved it is still running."""
+    """Record observed activity from this task's own Claude worker."""
     if not TASK_ID_RE.fullmatch(task_id):
         return
     path = liveness_path(root, task_id)
@@ -994,7 +994,7 @@ def update_claude_usage(
 
 
 def heartbeat_tick(root: Path, task_id: str, generation: str) -> bool:
-    """Heartbeat only while the task's own worker is still proving liveness."""
+    """Heartbeat only while the task's own worker keeps producing observed activity."""
     if not worker_liveness_fresh(root, task_id):
         return False
     heartbeat_record(root, task_id, generation)
@@ -1969,9 +1969,6 @@ def main(argv: list[str]) -> int:
             if argv[2] not in {"0", "1"}:
                 return 2
             print(json.dumps(snapshot_plan(state_root(argv[1]), enabled, Path(argv[3])), separators=(",", ":")))
-            return 0
-        if action == "cleanup" and len(argv) == 3:
-            cleanup_task(state_root(argv[1]), argv[2])
             return 0
     except (OSError, ValueError, json.JSONDecodeError, UnicodeError):
         return 1
