@@ -106,7 +106,7 @@ The private writer record includes a random launch generation that is never expo
 Writers may restore only a matching schema, task ID, harness, and generation.
 A telemetry file is admitted only when it is a direct regular-file child of the real state directory, is not a symlink, is owned by the current user, grants no group or other permissions, and is at most 16 KiB.
 Temporary files use owner-only creation and atomic replacement.
-Every write stages at one deterministic hidden name beside its own file (`.<file-name>.tmp`), so an interrupted write leaves at most one leftover per file and each fixed cleanup list removes it by exact name rather than by globbing the state directory.
+Every write stages at one deterministic hidden name beside its own file (the file's own name with `.tmp` appended, dot-prefixed first when the file is not already hidden), so an interrupted write leaves at most one leftover per file and each fixed cleanup list removes it by exact name rather than by globbing the state directory.
 The snapshot command projects fields one by one and never forwards a private writer object wholesale.
 
 Telemetry failures are passive.
@@ -174,7 +174,7 @@ Only a main-query event or official status-line update may select the displayed 
 A malformed, rejected, or overflowing usage observation changes coverage to `since_observed` for the remaining life of that collector, so a later valid event never restores `full_worker`.
 A status-line update that repeats the already recorded model leaves the record untouched, because the collector heartbeat rather than the status line owns freshness.
 Claude freshness is activity-based rather than process-based.
-The collector heartbeats only while that worker's own authenticated exporter request or status-line render arrived within the last 120 seconds, so a Claude record stays fresh through continued worker activity and ages to stale roughly two to three and a half minutes after the last such activity.
+The collector heartbeats only while that worker's own authenticated exporter request or status-line render arrived within the last 120 seconds, so a Claude record stays fresh through continued worker activity and ages to stale roughly three to three and a half minutes after the last such activity (a 30-second heartbeat inside the 120-second activity window, then the 90-second staleness threshold).
 A Claude worker that is alive but idle therefore reads stale, and Firstmate deliberately tracks no Claude process lifecycle to distinguish the two.
 Activity is recorded as a task-scoped owner-only marker beside the record; it carries no payload, is never projected, and is removed with the rest of that task's telemetry.
 
