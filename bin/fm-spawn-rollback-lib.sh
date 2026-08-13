@@ -20,8 +20,10 @@ fm_spawn_identity_rollback() { # <root> <home> <state> <task-id> <kind> <task-tm
     rm -f "$state/$id.status" "$state/$id.turn-ended" \
       "$state/$id.pi-ext.ts" "$state/$id.telemetry.json" \
       "$state/.$id.telemetry.lock" "$state/.$id.telemetry.json.tmp" \
-      "$state/$id.claude-telemetry.json" "$state/.$id.claude-live" \
-      "$state/.$id.claude-ready.json" "$state/.$id.claude-bootstrap.json" \
+      "$state/$id.claude-telemetry.json" "$state/.$id.claude-telemetry.json.tmp" \
+      "$state/.$id.claude-live" \
+      "$state/.$id.claude-ready.json" "$state/.$id.claude-ready.json.tmp" \
+      "$state/.$id.claude-bootstrap.json" "$state/.$id.claude-bootstrap.json.tmp" \
       "$state/$id.herdr-nm-activity" "$meta"
     return 0
   fi

@@ -679,6 +679,196 @@ CHILD
   pass "a finished suite retires its task-scoped collector and removes its temp root"
 }
 
+wait_for_exit() { # <pid> <deciseconds>
+  local pid=$1 limit=$2 waited=0
+  while kill -0 "$pid" 2>/dev/null && [ "$waited" -lt "$limit" ]; do
+    sleep 0.1
+    waited=$((waited + 1))
+  done
+  ! kill -0 "$pid" 2>/dev/null
+}
+
+collector_pid() { # <control-record>
+  python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["pid"])' "$1"
+}
+
+test_status_line_render_loads_no_collector_modules() {
+  local state generation out
+  state="$TMP_ROOT/status-imports/state"
+  mkdir -p "$state"
+  make_meta "$state" imports-x1 claude
+  generation=$(FM_STATE_OVERRIDE="$state" "$INIT" imports-x1 claude) \
+    || fail "status-import fixture init failed"
+  # The status line re-renders for the whole life of every Claude worker, so the
+  # collector, subprocess, and nonce modules must never load on that path.
+  out=$(FM_TELEMETRY_STATE="$state" FM_TELEMETRY_MODULE="$ROOT/bin/telemetry/fm-telemetry.py" \
+    FM_TELEMETRY_GENERATION="$generation" python3 - <<'PY'
+import importlib.util, json, os, sys
+
+heavy = ("http.server", "hashlib", "selectors", "shlex", "socket", "subprocess", "tempfile", "secrets")
+before = sorted(name for name in heavy if name in sys.modules)
+spec = importlib.util.spec_from_file_location("fm_telemetry", os.environ["FM_TELEMETRY_MODULE"])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+root = module.state_root(os.environ["FM_TELEMETRY_STATE"])
+module.claude_status_update(
+    root,
+    "imports-x1",
+    os.environ["FM_TELEMETRY_GENERATION"],
+    b'{"model":{"id":"claude-sonnet-4-5"}}',
+)
+print(json.dumps({
+    "preloaded": before,
+    "loaded": sorted(name for name in heavy if name in sys.modules),
+    "model": module.load_current_record(root, "imports-x1")["model"]["id"],
+}))
+PY
+  ) || fail "status-line import probe failed"
+  json_assert "$out" 'value["preloaded"] == []'
+  json_assert "$out" 'value["loaded"] == []'
+  json_assert "$out" 'value["model"] == "claude-sonnet-4-5"'
+  pass "a status-line render updates the record without loading any collector module"
+}
+
+test_writes_stage_at_one_fixed_name_per_file() {
+  local state generation name leftovers
+  state="$TMP_ROOT/staging/state"
+  mkdir -p "$state"
+  make_meta "$state" staging-x1 claude
+  generation=$(FM_STATE_OVERRIDE="$state" "$INIT" staging-x1 claude) \
+    || fail "staging fixture init failed"
+  assert_no_grep 'mkstemp' "$ROOT/bin/telemetry/fm-telemetry.py" \
+    "telemetry writes still stage at a random name no cleanup list can match"
+  name=$(FM_TELEMETRY_STATE="$state" FM_TELEMETRY_MODULE="$ROOT/bin/telemetry/fm-telemetry.py" python3 - <<'PY'
+import importlib.util, os
+from pathlib import Path
+
+spec = importlib.util.spec_from_file_location("fm_telemetry", os.environ["FM_TELEMETRY_MODULE"])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+root = module.state_root(os.environ["FM_TELEMETRY_STATE"])
+print(module.staging_path(root / "staging-x1.telemetry.json").name)
+PY
+  ) || fail "staging-name probe failed"
+  [ "$name" = ".staging-x1.telemetry.json.tmp" ] \
+    || fail "the record staging name is not the fixed cleanup name (got '$name')"
+  printf '%s' '{"model":{"id":"claude-sonnet-4-5"}}' \
+    | FM_STATE_OVERRIDE="$state" "$CLAUDE" status staging-x1 "$generation"
+  leftovers=$(find "$state" -maxdepth 1 -name '.staging-x1.telemetry.json.*' | wc -l | tr -d ' ')
+  [ "$leftovers" = 0 ] || fail "a completed record write left staging files behind"
+
+  # An interrupted write leaves exactly these names, and task cleanup removes
+  # each one without ever globbing the state directory.
+  : > "$state/.staging-x1.telemetry.json.tmp"
+  : > "$state/.staging-x1.claude-telemetry.json.tmp"
+  : > "$state/.staging-x1.claude-ready.json.tmp"
+  : > "$state/.staging-x1.claude-bootstrap.json.tmp"
+  FM_STATE_OVERRIDE="$state" "$CLAUDE" stop staging-x1
+  assert_absent "$state/.staging-x1.telemetry.json.tmp" "an interrupted record write outlived its task"
+  assert_absent "$state/.staging-x1.claude-telemetry.json.tmp" "an interrupted control write outlived its task"
+  assert_absent "$state/.staging-x1.claude-ready.json.tmp" "an interrupted ready write outlived its task"
+  assert_absent "$state/.staging-x1.claude-bootstrap.json.tmp" "an interrupted bootstrap write outlived its task"
+  pass "every telemetry write stages at one fixed name that task cleanup removes"
+}
+
+test_collector_stop_survives_whitespace_paths() {
+  local root state tasktmp fakebin pid
+  root="$TMP_ROOT/claude whitespace"
+  state="$root/state dir"
+  tasktmp="$root/task tmp"
+  fakebin="$root/fake bin"
+  mkdir -p "$state" "$tasktmp"
+  make_fake_claude "$fakebin"
+  make_meta "$state" spaced-x1 claude
+  FM_STATE_OVERRIDE="$state" "$INIT" spaced-x1 claude >/dev/null \
+    || fail "whitespace-path fixture init failed"
+  PATH="$fakebin:$BASE_PATH" FM_STATE_OVERRIDE="$state" "$CLAUDE" \
+    start spaced-x1 "$tasktmp/telemetry.env" \
+    || fail "the collector failed to start under a whitespace state root"
+  pid=$(collector_pid "$state/spaced-x1.claude-telemetry.json") \
+    || fail "the whitespace-path collector wrote no control record"
+  # ps joins argv with plain spaces, so an argv-reconstructing identity check
+  # mis-splits these paths and silently refuses to retire this task's collector.
+  FM_STATE_OVERRIDE="$state" "$CLAUDE" stop spaced-x1
+  if ! wait_for_exit "$pid" 30; then
+    kill -9 "$pid" 2>/dev/null || true
+    fail "a collector under a whitespace state root was never retired"
+  fi
+  assert_absent "$state/spaced-x1.claude-telemetry.json" \
+    "the whitespace-path collector control record outlived its task"
+  pass "collector stop retires its own collector even under whitespace paths"
+}
+
+test_collector_retires_itself_when_its_task_is_gone() {
+  local root state tasktmp fakebin pid
+  root="$TMP_ROOT/claude-selfexit"
+  state="$root/state"
+  tasktmp="$root/tasktmp"
+  fakebin="$root/fakebin"
+  mkdir -p "$state" "$tasktmp"
+  make_fake_claude "$fakebin"
+
+  # A cleanup that removed the record without signaling (a deleted state
+  # directory) must not leave a loopback listener behind.
+  make_meta "$state" selfexit-x1 claude
+  FM_STATE_OVERRIDE="$state" "$INIT" selfexit-x1 claude >/dev/null \
+    || fail "self-exit fixture init failed"
+  PATH="$fakebin:$BASE_PATH" FM_TELEMETRY_TEST_MODE=1 FM_TELEMETRY_TEST_NOW=1785542400 \
+    FM_TELEMETRY_TEST_HEARTBEAT=0.05 FM_STATE_OVERRIDE="$state" "$CLAUDE" \
+    start selfexit-x1 "$tasktmp/telemetry.env" || fail "self-exit collector failed to start"
+  pid=$(collector_pid "$state/selfexit-x1.claude-telemetry.json") \
+    || fail "the self-exit collector wrote no control record"
+  rm -f "$state/selfexit-x1.telemetry.json"
+  if ! wait_for_exit "$pid" 100; then
+    kill -9 "$pid" 2>/dev/null || true
+    fail "a collector whose own record was removed never retired itself"
+  fi
+  assert_absent "$state/selfexit-x1.claude-telemetry.json" \
+    "a self-retired collector left a control record naming a dead process"
+
+  # A spawn killed before it recorded the task leaves nothing that teardown can
+  # find, so the collector bounds that case itself.
+  make_meta "$state" selfexit-x2 claude
+  FM_STATE_OVERRIDE="$state" "$INIT" selfexit-x2 claude >/dev/null \
+    || fail "unclaimed-task fixture init failed"
+  PATH="$fakebin:$BASE_PATH" FM_TELEMETRY_TEST_MODE=1 FM_TELEMETRY_TEST_NOW=1785542400 \
+    FM_TELEMETRY_TEST_HEARTBEAT=0.05 FM_STATE_OVERRIDE="$state" "$CLAUDE" \
+    start selfexit-x2 "$tasktmp/telemetry2.env" || fail "unclaimed-task collector failed to start"
+  pid=$(collector_pid "$state/selfexit-x2.claude-telemetry.json") \
+    || fail "the unclaimed-task collector wrote no control record"
+  rm -f "$state/selfexit-x2.meta"
+  if ! wait_for_exit "$pid" 100; then
+    kill -9 "$pid" 2>/dev/null || true
+    fail "a collector for a task no spawn ever recorded never retired itself"
+  fi
+  [ -e "$state/selfexit-x2.telemetry.json" ] \
+    || fail "a self-retiring collector removed the telemetry record it never owned"
+  pass "a collector retires itself once its task record or meta is gone"
+}
+
+test_a_suite_with_its_own_trap_leaves_no_registry_file() {
+  local root child registry
+  root="$TMP_ROOT/registry"
+  child="$root/child-suite.sh"
+  mkdir -p "$root"
+
+  # Most suites replace the library's EXIT trap with their own, so the shared
+  # cleanup registry must not exist until a temp root is actually registered.
+  cat > "$child" <<CHILD
+#!/usr/bin/env bash
+set -u
+. "$ROOT/tests/lib.sh"
+trap 'exit 0' EXIT
+printf '%s\n' "\$FM_TEST_CLEANUP_REGISTRY"
+CHILD
+  chmod +x "$child"
+  registry=$(bash "$child") || fail "cleanup-registry probe failed"
+  [ -n "$registry" ] || fail "tests/lib.sh exposes no cleanup registry path"
+  assert_absent "$registry" \
+    "a suite that registered no temp root still left a cleanup registry file in TMPDIR"
+  pass "sourcing tests/lib.sh creates no registry file until a temp root is registered"
+}
+
 test_snapshot_bounds_and_hostile_files
 test_snapshot_status_timestamp_and_integer_controls
 test_pi_projection_exact_usage_and_passive_failure
@@ -689,6 +879,11 @@ test_claude_usage_gap_downgrades_coverage_permanently
 test_claude_status_line_skips_redundant_record_writes
 test_claude_freshness_follows_worker_liveness
 test_claude_start_leaves_no_orphan_collector
+test_status_line_render_loads_no_collector_modules
+test_writes_stage_at_one_fixed_name_per_file
+test_collector_stop_survives_whitespace_paths
+test_collector_retires_itself_when_its_task_is_gone
 test_every_task_scoped_file_is_in_the_fixed_cleanup_lists
 test_claude_stop_refuses_unrelated_process
 test_a_finished_suite_leaves_no_collector_behind
+test_a_suite_with_its_own_trap_leaves_no_registry_file

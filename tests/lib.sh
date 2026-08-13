@@ -53,9 +53,9 @@ pass() {
 # --- self-cleaning temp root ------------------------------------------------
 #
 # fm_test_tmproot <prefix> echoes a fresh temp dir and registers it for removal
-# on EXIT. The first call installs the cleanup trap. A test file that needs
-# extra teardown (e.g. killing a daemon) should define its own EXIT trap and
-# call fm_test_cleanup from inside it so registered dirs are still removed.
+# on EXIT. Sourcing this library installs the cleanup trap. A test file that
+# needs extra teardown (e.g. killing a daemon) should define its own EXIT trap
+# and call fm_test_cleanup from inside it so registered dirs are still removed.
 
 FM_TEST_CLEANUP_DIRS=()
 
@@ -72,26 +72,35 @@ FM_TEST_CLEANUP_DIRS=()
 # per worker, and a collector exits only on the explicit stop that
 # teardown/rollback issues, so deleting the state directory alone would leave a
 # live loopback listener behind after the suite ends.
-FM_TEST_CLEANUP_REGISTRY=$(mktemp "${TMPDIR:-/tmp}/fm-test-cleanup.XXXXXX")
+#
+# The registry name is derived from the sourcing shell's own PID rather than
+# created here: $$ is stable inside the command-substitution subshell that calls
+# fm_test_tmproot, and the file itself is created by that first append. A suite
+# that never registers a root therefore creates no registry file at all, even
+# when it replaces the EXIT trap below without calling fm_test_cleanup. Any file
+# left by a dead shell that once held this PID is cleared at source time.
+FM_TEST_CLEANUP_REGISTRY="${TMPDIR:-/tmp}/fm-test-cleanup.${UID:-0}.$$"
+rm -f "$FM_TEST_CLEANUP_REGISTRY"
 
 fm_test_cleanup() {
   local d control id
-  [ -f "$FM_TEST_CLEANUP_REGISTRY" ] || return 0
-  while IFS= read -r d; do
-    [ -n "$d" ] && [ -d "$d" ] || continue
-    while IFS= read -r -d '' control; do
-      id=$(basename "$control" .claude-telemetry.json)
-      FM_STATE_OVERRIDE="$(dirname "$control")" \
-        "$ROOT/bin/fm-claude-telemetry.sh" stop "$id" >/dev/null 2>&1 || true
-    done < <(find "$d" -type f -name '*.claude-telemetry.json' -print0 2>/dev/null)
-  done < "$FM_TEST_CLEANUP_REGISTRY"
-  while IFS= read -r d; do
-    [ -n "$d" ] && rm -rf "$d"
-  done < "$FM_TEST_CLEANUP_REGISTRY"
+  if [ -f "$FM_TEST_CLEANUP_REGISTRY" ]; then
+    while IFS= read -r d; do
+      [ -n "$d" ] && [ -d "$d" ] || continue
+      while IFS= read -r -d '' control; do
+        id=$(basename "$control" .claude-telemetry.json)
+        FM_STATE_OVERRIDE="$(dirname "$control")" \
+          "$ROOT/bin/fm-claude-telemetry.sh" stop "$id" >/dev/null 2>&1 || true
+      done < <(find "$d" -type f -name '*.claude-telemetry.json' -print0 2>/dev/null)
+    done < "$FM_TEST_CLEANUP_REGISTRY"
+    while IFS= read -r d; do
+      [ -n "$d" ] && rm -rf "$d"
+    done < "$FM_TEST_CLEANUP_REGISTRY"
+    rm -f "$FM_TEST_CLEANUP_REGISTRY"
+  fi
   for d in "${FM_TEST_CLEANUP_DIRS[@]:-}"; do
     [ -n "$d" ] && rm -rf "$d"
   done
-  rm -f "$FM_TEST_CLEANUP_REGISTRY"
   return 0
 }
 

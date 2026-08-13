@@ -106,6 +106,7 @@ The private writer record includes a random launch generation that is never expo
 Writers may restore only a matching schema, task ID, harness, and generation.
 A telemetry file is admitted only when it is a direct regular-file child of the real state directory, is not a symlink, is owned by the current user, grants no group or other permissions, and is at most 16 KiB.
 Temporary files use owner-only creation and atomic replacement.
+Every write stages at one deterministic hidden name beside its own file (`.<file-name>.tmp`), so an interrupted write leaves at most one leftover per file and each fixed cleanup list removes it by exact name rather than by globbing the state directory.
 The snapshot command projects fields one by one and never forwards a private writer object wholesale.
 
 Telemetry failures are passive.
@@ -126,6 +127,15 @@ The writer emits a 30-second heartbeat and a final observation on Pi session shu
 It stages each write at one task-scoped owner-only name beside the record, so an interrupted write leaves at most one leftover that normal task cleanup removes by exact name.
 
 ## Claude producer
+
+Claude worker telemetry is always on and has no operator opt-out.
+Every newly launched non-secondmate Claude worker initializes a record, resolves provider identity, starts its own task-scoped loopback collector, and receives the exporter environment described below.
+It is deliberately not a `config/` toggle: the projection is task-scoped, passive, and privacy-pinned, and every one of its artifacts is removed by that task's own cleanup.
+The single kill path for a misbehaving collector is `bin/fm-claude-telemetry.sh stop <task-id>`, which retires only that task's identity-checked collector.
+
+The launch also writes a `statusLine` command into that worker's task-local `.claude/settings.local.json`.
+It is scoped to the worker worktree, is git-excluded, and is removed with the worktree, but it does override any global status line the captain configured for the duration of that task.
+Its only effect is the model projection described below; the status-line render loads no collector, subprocess, or nonce module, so it stays a cheap per-render call.
 
 Claude telemetry is enabled for a newly launched non-secondmate worker only when the built-in privacy self-test passes and a task-scoped loopback collector starts successfully.
 Otherwise Claude launches normally and worker telemetry remains unavailable.
@@ -169,8 +179,14 @@ A Claude worker that is alive but idle therefore reads stale, and Firstmate deli
 Activity is recorded as a task-scoped owner-only marker beside the record; it carries no payload, is never projected, and is removed with the rest of that task's telemetry.
 
 Collector cleanup validates the owner-only control record, task ID, PID, process start instant, executable script, state root, and exact collector arguments before signaling.
+The argument check compares the raw process command tail, because process listings join arguments with plain spaces and never quote, so a state root, task temp path, or interpreter path containing whitespace still retires its own collector.
 It waits a bounded interval after TERM and uses KILL only after the same complete process identity is revalidated.
 It never searches process namespaces and never targets a shared Claude, Firstmate, Herdr, Codex, or No Mistakes process.
+
+A collector also retires itself, so no path that skips cleanup can leave a loopback listener behind for the rest of the session.
+It exits after three consecutive heartbeats without its own generation-bound record, which covers a removed state directory or a cleanup that removed the record without signaling, and after twenty consecutive heartbeats without the task's own `state/<task-id>.meta`, which covers a spawn killed before it recorded the task.
+Both bounds track task-cleanup artifacts rather than worker lifecycle, so an alive-but-idle Claude worker keeps its collector.
+A self-retiring collector removes the control record it wrote for itself, and never one a later collector for the same task wrote.
 
 ## Codex worker telemetry
 

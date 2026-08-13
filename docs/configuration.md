@@ -38,6 +38,10 @@ A dashboard service must set `FM_PLAN_USAGE_MANUAL=1` before startup to enable t
 The file is local, gitignored, owner-only, not inherited into secondmate homes, and has no browser write path.
 [`worker-telemetry.md`](worker-telemetry.md#disabled-manual-claude-boundary) owns its exact schema, containment, expiry, projection, and refusal contract.
 
+Claude worker telemetry itself is deliberately the opposite: it is always on for newly launched non-secondmate Claude workers and has no configuration toggle, because it is task-scoped, passive, privacy-pinned, and fully removed by that task's own cleanup.
+Its launch also writes a task-local `statusLine` command into the worker worktree's git-excluded `.claude/settings.local.json`, which overrides any global status line for the life of that task only.
+`bin/fm-claude-telemetry.sh stop <task-id>` is the kill path for a single misbehaving collector; [`worker-telemetry.md`](worker-telemetry.md#claude-producer) owns the rest.
+
 ## Backlog backend (.tasks.toml / config/backlog-backend)
 
 The tracked `.tasks.toml` pins the default `tasks-axi` markdown backend to `data/backlog.md`, with `done_keep = 10` and an archive at `data/done-archive.md`.

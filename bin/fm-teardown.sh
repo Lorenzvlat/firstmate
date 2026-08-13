@@ -1040,8 +1040,11 @@ cleanup_firstmate_home_children() {
       "$sub_state/$child_id.meta" "$sub_state/$child_id.pi-ext.ts" \
       "$sub_state/$child_id.telemetry.json" "$sub_state/.$child_id.telemetry.lock" \
       "$sub_state/.$child_id.telemetry.json.tmp" \
-      "$sub_state/$child_id.claude-telemetry.json" "$sub_state/.$child_id.claude-live" \
-      "$sub_state/.$child_id.claude-ready.json" "$sub_state/.$child_id.claude-bootstrap.json" \
+      "$sub_state/$child_id.claude-telemetry.json" \
+      "$sub_state/.$child_id.claude-telemetry.json.tmp" "$sub_state/.$child_id.claude-live" \
+      "$sub_state/.$child_id.claude-ready.json" "$sub_state/.$child_id.claude-ready.json.tmp" \
+      "$sub_state/.$child_id.claude-bootstrap.json" \
+      "$sub_state/.$child_id.claude-bootstrap.json.tmp" \
       "$sub_state/$child_id.grok-turnend-token" "$sub_state/$child_id.kimi-turnend-token" \
       "$sub_state/$child_id.herdr-nm-activity"
   done
@@ -1238,8 +1241,10 @@ remove_pr_poll_artifacts "$STATE" "$ID" || exit 1
 rm -f "$STATE/$ID.status" "$STATE/$ID.turn-ended" "$STATE/$ID.meta" \
   "$STATE/$ID.pi-ext.ts" "$STATE/$ID.telemetry.json" \
   "$STATE/.$ID.telemetry.lock" "$STATE/.$ID.telemetry.json.tmp" \
-  "$STATE/$ID.claude-telemetry.json" "$STATE/.$ID.claude-live" \
-  "$STATE/.$ID.claude-ready.json" "$STATE/.$ID.claude-bootstrap.json" \
+  "$STATE/$ID.claude-telemetry.json" "$STATE/.$ID.claude-telemetry.json.tmp" \
+  "$STATE/.$ID.claude-live" \
+  "$STATE/.$ID.claude-ready.json" "$STATE/.$ID.claude-ready.json.tmp" \
+  "$STATE/.$ID.claude-bootstrap.json" "$STATE/.$ID.claude-bootstrap.json.tmp" \
   "$STATE/$ID.grok-turnend-token" "$STATE/$ID.kimi-turnend-token" \
   "$STATE/$ID.herdr-nm-activity"
 if [ "$KIND" != scout ] && [ "$KIND" != secondmate ] && [ "$MODE" != local-only ]; then

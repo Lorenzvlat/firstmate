@@ -32,7 +32,7 @@ Command:
 bin/fm-test-run.sh tests/fm-worker-telemetry.test.sh
 ```
 
-Exact focused result on 2026-08-11 after the passive-failure, activity-based freshness, generation, orphan-collector, and fixed-cleanup fixes:
+Exact focused result on 2026-08-12 after the status-line import, whitespace-identity, collector self-exit, fixed-staging, and test-registry fixes:
 
 ```text
 ok - worker snapshot bounds count, bytes, owner mode, symlinks, and generic warning enums
@@ -45,9 +45,14 @@ ok - Claude uncounted usage downgrades coverage once and never restores full_wor
 ok - status-line renders update the record only for this task, generation, and a changed model
 ok - Claude freshness tracks observed worker activity and ages to stale once that activity stops
 ok - a failed Claude start publishes no environment and leaves no orphan collector
+ok - a status-line render updates the record without loading any collector module
+ok - every telemetry write stages at one fixed name that task cleanup removes
+ok - collector stop retires its own collector even under whitespace paths
+ok - a collector retires itself once its task record or meta is gone
 ok - every task-scoped telemetry file is removed by name by each fixed cleanup list
 ok - Claude stop refuses an unrelated process even when a private control record names its PID
 ok - a finished suite retires its task-scoped collector and removes its temp root
+ok - sourcing tests/lib.sh creates no registry file until a temp root is registered
 FM_TEST_SUMMARY total=1 failed=0 skipped_gate=0
 ```
 
@@ -79,6 +84,20 @@ OTEL_LOG_RAW_API_BODIES='0'
 
 The collector cleanup test records its task PID, invokes the fixed stop helper, and verifies both process absence and removal of only that task's control, activity, and summary records.
 A separate start test points the launch environment at an unpublishable location and confirms the failed start reports failure, publishes nothing, retires its own collector, and leaves no control record behind.
+The whitespace fixture runs the same start/stop cycle with spaces in the state root, task temp path, and fake-binary directory, because process listings join arguments with plain spaces: it fails if the identity check reconstructs an argument vector instead of comparing the raw command tail.
+The self-exit fixture starts real collectors under a shortened heartbeat, removes the telemetry record for one and the task meta for the other, and requires each collector process to exit on its own and to remove only the control record it wrote for itself.
+
+## Status-line render cost
+
+The status-line command re-runs for the whole life of every Claude worker, so its path loads no collector, subprocess, or nonce module.
+The import fixture records the heavy module names present before loading the module, performs a real status update, and requires that set to still be empty afterwards.
+
+Measured on 2026-08-12 on this machine, ten runs of `bin/fm-claude-telemetry.sh status <id> <generation>` against one initialized record:
+
+```text
+before: 46.9 ms best-of-ten
+after:  31.2 ms best-of-ten
+```
 
 ## Codex worker transport refusal
 

@@ -9,26 +9,22 @@ from __future__ import annotations
 
 import datetime as dt
 import fcntl
-import hashlib
-import http.server
 import json
 import math
 import os
 import re
-import secrets
-import selectors
-import shlex
 import signal
-import socket
 import stat
-import subprocess
 import sys
-import tempfile
-import threading
 import time
 from collections import deque
 from pathlib import Path
 from typing import Any
+
+# Only the modules the Claude status-line path itself uses are imported here.
+# That path re-runs on every status-line render of every live Claude worker, so
+# the collector, subprocess, and nonce modules are imported inside the few
+# functions that need them rather than at every interpreter start.
 
 MAX_SAFE_INTEGER = 9_007_199_254_740_991
 TASK_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$", re.ASCII)
@@ -37,6 +33,14 @@ GENERATION_RE = re.compile(r"^[a-f0-9]{32}$", re.ASCII)
 # status-line render is the only observed activity. Freshness may outlive the
 # last such activity by at most this many seconds, never by process lifecycle.
 WORKER_LIVENESS_WINDOW = 120.0
+COLLECTOR_HEARTBEAT_INTERVAL = 30.0
+# Consecutive heartbeat ticks without this collector's own generation-bound
+# record before it retires itself.
+COLLECTOR_UNBOUND_EXIT_TICKS = 3
+# Consecutive heartbeat ticks without the task's own meta file before it retires
+# itself. Spawn writes that meta within seconds of starting a collector, so this
+# grace only expires for a task whose spawn died before recording it.
+COLLECTOR_UNCLAIMED_EXIT_TICKS = 20
 PROVIDER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:+/-]{0,39}$", re.ASCII)
 MODEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:+/-]{0,119}$", re.ASCII)
 SCOPE_LABEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 ._+:/-]{0,63}$", re.ASCII)
@@ -251,48 +255,57 @@ def read_secure_json(path: Path, root: Path, max_bytes: int, *, owner_only: bool
     return json.loads(data.decode("utf-8"))
 
 
+def staging_path(path: Path) -> Path:
+    """One hidden owner-only staging name per written file, beside that file.
+
+    Deterministic rather than random, so an interrupted write leaves at most one
+    leftover per file and every fixed cleanup list removes it by exact name.
+    """
+    name = path.name if path.name.startswith(".") else f".{path.name}"
+    return path.parent / f"{name}.tmp"
+
+
+def atomic_bytes(path: Path, data: bytes, max_bytes: int) -> None:
+    if len(data) > max_bytes:
+        raise ValueError("too large")
+    tmp = staging_path(path)
+    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    fd = os.open(tmp, flags, 0o600)
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid():
+            raise ValueError("unsafe staging")
+        os.fchmod(fd, 0o600)
+    except BaseException:
+        os.close(fd)
+        raise
+    try:
+        with os.fdopen(fd, "wb", closefd=True) as stream:
+            stream.write(data)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(tmp, path)
+        os.chmod(path, 0o600)
+    finally:
+        try:
+            tmp.unlink()
+        except FileNotFoundError:
+            pass
+
+
 def atomic_json(path: Path, root: Path, value: Any, max_bytes: int) -> None:
     if path.parent.resolve(strict=True) != root or not contained(root, path):
         raise ValueError("outside root")
     data = (json.dumps(value, separators=(",", ":"), sort_keys=True) + "\n").encode("utf-8")
-    if len(data) > max_bytes:
-        raise ValueError("too large")
-    fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=root)
-    tmp = Path(tmp_name)
-    try:
-        os.fchmod(fd, 0o600)
-        with os.fdopen(fd, "wb", closefd=True) as stream:
-            stream.write(data)
-            stream.flush()
-            os.fsync(stream.fileno())
-        os.replace(tmp, path)
-        os.chmod(path, 0o600)
-    finally:
-        try:
-            tmp.unlink()
-        except FileNotFoundError:
-            pass
+    atomic_bytes(path, data, max_bytes)
 
 
 def atomic_text(path: Path, root: Path, value: str, max_bytes: int) -> None:
-    data = value.encode("utf-8")
-    if len(data) > max_bytes:
-        raise ValueError("too large")
-    fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=root)
-    tmp = Path(tmp_name)
-    try:
-        os.fchmod(fd, 0o600)
-        with os.fdopen(fd, "wb", closefd=True) as stream:
-            stream.write(data)
-            stream.flush()
-            os.fsync(stream.fileno())
-        os.replace(tmp, path)
-        os.chmod(path, 0o600)
-    finally:
-        try:
-            tmp.unlink()
-        except FileNotFoundError:
-            pass
+    if path.parent.resolve(strict=True) != root or not contained(root, path):
+        raise ValueError("outside root")
+    atomic_bytes(path, value.encode("utf-8"), max_bytes)
 
 
 def lock_path(root: Path, task_id: str) -> Path:
@@ -597,6 +610,8 @@ def snapshot_worker_bounded(root: Path) -> dict[str, Any]:
 
 
 def initialize_record(root: Path, task_id: str, harness: str) -> str:
+    import secrets
+
     if not TASK_ID_RE.fullmatch(task_id):
         raise ValueError("bad task")
     generation = secrets.token_hex(16)
@@ -666,6 +681,9 @@ def run_bounded_command(
     timeout: float,
     maximum: int,
 ) -> tuple[int | None, bytes | None, str | None]:
+    import selectors
+    import subprocess
+
     try:
         process = subprocess.Popen(
             argv,
@@ -898,6 +916,8 @@ class UsageCoverage:
     """Sticky per-collector record of usage that was admitted but never counted."""
 
     def __init__(self) -> None:
+        import threading
+
         self.lock = threading.Lock()
         self.dropped = False
 
@@ -1001,6 +1021,57 @@ def heartbeat_tick(root: Path, task_id: str, generation: str) -> bool:
     return True
 
 
+def collector_heartbeat_interval() -> float:
+    """Heartbeat cadence, shortened only under this module's own test mode."""
+    if os.environ.get("FM_TELEMETRY_TEST_MODE") == "1":
+        try:
+            value = float(os.environ.get("FM_TELEMETRY_TEST_HEARTBEAT", ""))
+        except ValueError:
+            return COLLECTOR_HEARTBEAT_INTERVAL
+        if math.isfinite(value) and 0.01 <= value <= COLLECTOR_HEARTBEAT_INTERVAL:
+            return value
+    return COLLECTOR_HEARTBEAT_INTERVAL
+
+
+def record_still_bound(root: Path, task_id: str, generation: str) -> bool:
+    """Is this collector's own generation-bound record still present?
+
+    The record is written before the collector starts and removed only by task
+    cleanup, so a missing or re-generated record means this collector has nothing
+    left to write for. Read without the record lock so a bound check never
+    recreates a lock file that cleanup already removed. An unreadable but present
+    record counts as bound, because a transient read failure is not cleanup.
+    """
+    path = root / f"{task_id}.telemetry.json"
+    try:
+        raw = read_secure_json(path, root, 16 * 1024, owner_only=True)
+    except FileNotFoundError:
+        return False
+    except (OSError, ValueError, json.JSONDecodeError):
+        return os.path.lexists(path)
+    return isinstance(raw, dict) and raw.get("generation") == generation
+
+
+def task_claimed(root: Path, task_id: str) -> bool:
+    """Has the spawn that started this collector recorded the task yet?"""
+    return os.path.lexists(root / f"{task_id}.meta")
+
+
+def drop_own_control_record(root: Path, task_id: str) -> None:
+    """Retire the control record a self-exiting collector wrote for itself.
+
+    Only when it still names this process, so a collector that a restart already
+    replaced never removes its successor's record.
+    """
+    path = root / f"{task_id}.claude-telemetry.json"
+    try:
+        control = read_secure_json(path, root, 4096, owner_only=True)
+        if isinstance(control, dict) and control.get("pid") == os.getpid():
+            path.unlink()
+    except (OSError, ValueError, json.JSONDecodeError):
+        return
+
+
 def heartbeat_record(root: Path, task_id: str, generation: str) -> None:
     try:
         with RecordLock(root, task_id):
@@ -1014,140 +1085,153 @@ def heartbeat_record(root: Path, task_id: str, generation: str) -> None:
         return
 
 
-class ClaudeCollector(http.server.ThreadingHTTPServer):
-    daemon_threads = True
-    allow_reuse_address = False
+def build_claude_collector(
+    root: Path,
+    task_id: str,
+    generation: str,
+    provider: str | None,
+    token: str,
+) -> Any:
+    """Build this task's loopback collector.
 
-    def __init__(
-        self,
-        root: Path,
-        task_id: str,
-        generation: str,
-        provider: str | None,
-        token: str,
-    ):
-        super().__init__(("127.0.0.1", 0), ClaudeCollectorHandler)
-        if self.server_address[0] not in {"127.0.0.1", "::1"}:
-            raise ValueError("non-loopback")
-        self.root = root
-        self.task_id = task_id
-        self.generation = generation
-        self.provider = provider
-        self.token = token
-        self.usage_coverage = UsageCoverage()
-        self.seen: set[str] = set()
-        self.order: deque[str] = deque()
-        self.seen_lock = threading.Lock()
+    The collector classes are defined here so the HTTP server, threading, and
+    hashing modules load in the collector process only, never on the status-line
+    path that renders while a Claude worker runs.
+    """
+    import hashlib
+    import http.server
+    import threading
 
-    def admit(self, projected: dict[str, Any]) -> bool:
-        pair = projected.get("dedupe")
-        if not isinstance(pair, tuple) or len(pair) != 2:
-            return False
-        digest = hashlib.sha256((self.token + "\0" + pair[0] + "\0" + pair[1]).encode("utf-8")).hexdigest()
-        with self.seen_lock:
-            if digest in self.seen:
+    class ClaudeCollector(http.server.ThreadingHTTPServer):
+        daemon_threads = True
+        allow_reuse_address = False
+
+        def __init__(self) -> None:
+            super().__init__(("127.0.0.1", 0), ClaudeCollectorHandler)
+            if self.server_address[0] not in {"127.0.0.1", "::1"}:
+                raise ValueError("non-loopback")
+            self.root = root
+            self.task_id = task_id
+            self.generation = generation
+            self.provider = provider
+            self.token = token
+            self.usage_coverage = UsageCoverage()
+            self.seen: set[str] = set()
+            self.order: deque[str] = deque()
+            self.seen_lock = threading.Lock()
+
+        def admit(self, projected: dict[str, Any]) -> bool:
+            pair = projected.get("dedupe")
+            if not isinstance(pair, tuple) or len(pair) != 2:
                 return False
-            self.seen.add(digest)
-            self.order.append(digest)
-            while len(self.order) > 4096:
-                retired = self.order.popleft()
-                self.seen.discard(retired)
-        return True
+            digest = hashlib.sha256((self.token + "\0" + pair[0] + "\0" + pair[1]).encode("utf-8")).hexdigest()
+            with self.seen_lock:
+                if digest in self.seen:
+                    return False
+                self.seen.add(digest)
+                self.order.append(digest)
+                while len(self.order) > 4096:
+                    retired = self.order.popleft()
+                    self.seen.discard(retired)
+            return True
 
+    class ClaudeCollectorHandler(http.server.BaseHTTPRequestHandler):
+        server: "ClaudeCollector"
+        protocol_version = "HTTP/1.1"
 
-class ClaudeCollectorHandler(http.server.BaseHTTPRequestHandler):
-    server: ClaudeCollector
-    protocol_version = "HTTP/1.1"
+        def log_message(self, _format: str, *_args: Any) -> None:
+            return
 
-    def log_message(self, _format: str, *_args: Any) -> None:
-        return
+        def generic(self, code: int) -> None:
+            body = b'{"status":"rejected"}\n'
+            self.send_response(code)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(body)
 
-    def generic(self, code: int) -> None:
-        body = b'{"status":"rejected"}\n'
-        self.send_response(code)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(body)))
-        self.send_header("Cache-Control", "no-store")
-        self.end_headers()
-        self.wfile.write(body)
-
-    def do_GET(self) -> None:
-        self.generic(404)
-
-    def do_HEAD(self) -> None:
-        self.generic(404)
-
-    def do_POST(self) -> None:
-        if self.path != "/v1/logs":
+        def do_GET(self) -> None:
             self.generic(404)
-            return
-        if self.headers.get("x-firstmate-telemetry-token") != self.server.token:
-            self.generic(403)
-            return
-        note_worker_liveness(self.server.root, self.server.task_id)
-        content_type = self.headers.get("Content-Type", "").split(";", 1)[0].strip().lower()
-        if content_type != "application/json":
-            self.generic(415)
-            return
-        try:
-            length = int(self.headers.get("Content-Length", ""))
-        except ValueError:
-            self.generic(400)
-            return
-        if length < 0 or length > 64 * 1024:
-            self.generic(413)
-            return
-        self.connection.settimeout(2)
-        payload_bytes = self.rfile.read(length)
-        if len(payload_bytes) != length:
-            self.generic(400)
-            return
-        try:
-            payload = json.loads(payload_bytes.decode("utf-8"))
-        except (UnicodeError, json.JSONDecodeError):
-            self.generic(400)
-            return
-        records = iter_log_records(payload)
-        if records is None:
-            note_usage_gap(
-                self.server.root,
-                self.server.task_id,
-                self.server.generation,
-                self.server.usage_coverage,
-            )
-            self.generic(400)
-            return
-        for row in records:
-            projected = project_claude_event(row)
-            if projected is None or not self.server.admit(projected):
-                continue
+
+        def do_HEAD(self) -> None:
+            self.generic(404)
+
+        def do_POST(self) -> None:
+            if self.path != "/v1/logs":
+                self.generic(404)
+                return
+            if self.headers.get("x-firstmate-telemetry-token") != self.server.token:
+                self.generic(403)
+                return
+            note_worker_liveness(self.server.root, self.server.task_id)
+            content_type = self.headers.get("Content-Type", "").split(";", 1)[0].strip().lower()
+            if content_type != "application/json":
+                self.generic(415)
+                return
             try:
-                update_claude_usage(
-                    self.server.root,
-                    self.server.task_id,
-                    self.server.generation,
-                    self.server.provider,
-                    projected,
-                    self.server.usage_coverage,
-                )
-            except (OSError, ValueError, json.JSONDecodeError):
+                length = int(self.headers.get("Content-Length", ""))
+            except ValueError:
+                self.generic(400)
+                return
+            if length < 0 or length > 64 * 1024:
+                self.generic(413)
+                return
+            self.connection.settimeout(2)
+            payload_bytes = self.rfile.read(length)
+            if len(payload_bytes) != length:
+                self.generic(400)
+                return
+            try:
+                payload = json.loads(payload_bytes.decode("utf-8"))
+            except (UnicodeError, json.JSONDecodeError):
+                self.generic(400)
+                return
+            records = iter_log_records(payload)
+            if records is None:
                 note_usage_gap(
                     self.server.root,
                     self.server.task_id,
                     self.server.generation,
                     self.server.usage_coverage,
                 )
-                continue
-        body = b"{}\n"
-        self.send_response(200)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(body)))
-        self.send_header("Cache-Control", "no-store")
-        self.end_headers()
-        self.wfile.write(body)
+                self.generic(400)
+                return
+            for row in records:
+                projected = project_claude_event(row)
+                if projected is None or not self.server.admit(projected):
+                    continue
+                try:
+                    update_claude_usage(
+                        self.server.root,
+                        self.server.task_id,
+                        self.server.generation,
+                        self.server.provider,
+                        projected,
+                        self.server.usage_coverage,
+                    )
+                except (OSError, ValueError, json.JSONDecodeError):
+                    note_usage_gap(
+                        self.server.root,
+                        self.server.task_id,
+                        self.server.generation,
+                        self.server.usage_coverage,
+                    )
+                    continue
+            body = b"{}\n"
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(body)
+
+    return ClaudeCollector()
 
 
 def collector_process(root: Path, task_id: str, bootstrap: Path, ready: Path) -> int:
+    import threading
+
     try:
         config = read_secure_json(bootstrap, root, 4096, owner_only=True)
         bootstrap.unlink()
@@ -1164,7 +1248,7 @@ def collector_process(root: Path, task_id: str, bootstrap: Path, ready: Path) ->
             provider = None
         if provider is not None and safe_identifier(provider, PROVIDER_RE) is None:
             return 1
-        server = ClaudeCollector(root, task_id, generation, provider, token)
+        server = build_claude_collector(root, task_id, generation, provider, token)
         process_start = process_start_identity(os.getpid())
         if process_start is None:
             return 1
@@ -1185,6 +1269,7 @@ def collector_process(root: Path, task_id: str, bootstrap: Path, ready: Path) ->
         return 1
 
     stopping = threading.Event()
+    retired_self = threading.Event()
 
     def stop(_signum: int, _frame: Any) -> None:
         stopping.set()
@@ -1194,18 +1279,37 @@ def collector_process(root: Path, task_id: str, bootstrap: Path, ready: Path) ->
     signal.signal(signal.SIGINT, stop)
 
     def heartbeat() -> None:
-        while not stopping.wait(30):
-            heartbeat_tick(root, task_id, generation)
+        # A collector also retires itself, so a task whose cleanup never ran - a
+        # spawn killed before it recorded the task, or a removed state directory
+        # - cannot leave a loopback listener behind for the rest of the session.
+        # Both bounds track task-cleanup artifacts rather than worker lifecycle,
+        # so an alive-but-idle worker keeps its collector.
+        unbound = 0
+        unclaimed = 0
+        interval = collector_heartbeat_interval()
+        while not stopping.wait(interval):
+            unbound = 0 if record_still_bound(root, task_id, generation) else unbound + 1
+            unclaimed = 0 if task_claimed(root, task_id) else unclaimed + 1
+            if unbound >= COLLECTOR_UNBOUND_EXIT_TICKS or unclaimed >= COLLECTOR_UNCLAIMED_EXIT_TICKS:
+                retired_self.set()
+                stop(signal.SIGTERM, None)
+                return
+            if unbound == 0:
+                heartbeat_tick(root, task_id, generation)
 
     threading.Thread(target=heartbeat, daemon=True).start()
     try:
         server.serve_forever(poll_interval=0.5)
     finally:
         server.server_close()
+        if retired_self.is_set():
+            drop_own_control_record(root, task_id)
     return 0
 
 
 def bounded_ps(pid: int, field: str, maximum: int) -> str | None:
+    import subprocess
+
     try:
         completed = subprocess.run(
             ["ps", "-ww", "-p", str(pid), "-o", f"{field}="],
@@ -1240,15 +1344,16 @@ def collector_identity_matches(
     command = bounded_ps(pid, "command", 16 * 1024)
     if command is None:
         return False
-    try:
-        argv = shlex.split(command)
-    except ValueError:
-        return False
     script = str(Path(__file__).resolve())
     bootstrap = str(root / f".{task_id}.claude-bootstrap.json")
     ready = str(root / f".{task_id}.claude-ready.json")
-    expected = [script, "claude-collector", str(root), task_id, bootstrap, ready]
-    return len(argv) == len(expected) + 1 and argv[1:] == expected
+    expected = " ".join([script, "claude-collector", str(root), task_id, bootstrap, ready])
+    # ps joins argv with plain spaces and never quotes, so the raw tail is
+    # compared as-is: reconstructing argv would mis-split a state root, task tmp
+    # path, or interpreter path that contains whitespace and would then silently
+    # refuse to retire this task's own collector.
+    suffix = f" {expected}"
+    return command.endswith(suffix) and len(command) > len(suffix)
 
 
 def stop_collector(root: Path, task_id: str, *, remove_record: bool) -> None:
@@ -1290,10 +1395,15 @@ def stop_collector(root: Path, task_id: str, *, remove_record: bool) -> None:
                             if not collector_identity_matches(pid, process_start, root, task_id):
                                 break
                             time.sleep(0.05)
+    # Each write stages at one deterministic name beside its file, so cleanup
+    # removes an interrupted write's leftover by exact name too.
     for path in (
         control_path,
+        root / f".{task_id}.claude-telemetry.json.tmp",
         root / f".{task_id}.claude-ready.json",
+        root / f".{task_id}.claude-ready.json.tmp",
         root / f".{task_id}.claude-bootstrap.json",
+        root / f".{task_id}.claude-bootstrap.json.tmp",
         liveness_path(root, task_id),
     ):
         try:
@@ -1301,7 +1411,11 @@ def stop_collector(root: Path, task_id: str, *, remove_record: bool) -> None:
         except FileNotFoundError:
             pass
     if remove_record:
-        for path in (root / f"{task_id}.telemetry.json", lock_path(root, task_id)):
+        for path in (
+            root / f"{task_id}.telemetry.json",
+            root / f".{task_id}.telemetry.json.tmp",
+            lock_path(root, task_id),
+        ):
             try:
                 path.unlink()
             except FileNotFoundError:
@@ -1313,6 +1427,9 @@ def shell_single_quote(value: str) -> str:
 
 
 def start_collector(root: Path, task_id: str, env_path: Path) -> bool:
+    import secrets
+    import subprocess
+
     if not claude_privacy_self_test() or not TASK_ID_RE.fullmatch(task_id):
         return False
     with RecordLock(root, task_id):
@@ -1431,6 +1548,9 @@ def codex_version_reason(env: dict[str, str], deadline: float) -> str | None:
 
 
 def rpc_codex_plan() -> tuple[dict[str, Any] | None, str | None]:
+    import selectors
+    import subprocess
+
     deadline = time.monotonic() + 5
     env = {key: os.environ[key] for key in ("HOME", "PATH", "LANG") if key in os.environ}
     if "CODEX_HOME" in os.environ:
