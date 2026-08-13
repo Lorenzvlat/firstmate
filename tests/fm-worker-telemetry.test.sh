@@ -24,6 +24,17 @@ PY
   fi
 }
 
+# Portable stat reads. Platform-detected, never the `stat -f || stat -c` fallback:
+# GNU `stat -f` means --file-system, so on Linux it prints filesystem details for
+# the file (and fails on the format operand) before the fallback ever runs.
+file_mode() { # <path>
+  if [ "$(uname)" = Darwin ]; then stat -f '%Lp' "$1"; else stat -c '%a' "$1"; fi
+}
+
+file_inode() { # <path>
+  if [ "$(uname)" = Darwin ]; then stat -f '%i' "$1"; else stat -c '%i' "$1"; fi
+}
+
 make_meta() { # <state> <id> <harness>
   printf 'harness=%s\nkind=ship\n' "$3" > "$1/$2.meta"
 }
@@ -36,7 +47,7 @@ test_snapshot_bounds_and_hostile_files() {
   make_meta "$state" good-x1 pi
   generation=$(FM_STATE_OVERRIDE="$state" "$INIT" good-x1 pi) || fail "worker telemetry init failed"
   [ "${#generation}" -eq 32 ] || fail "generation nonce is not fixed length"
-  [ "$(stat -f '%Lp' "$state/good-x1.telemetry.json" 2>/dev/null || stat -c '%a' "$state/good-x1.telemetry.json")" = 600 ] \
+  [ "$(file_mode "$state/good-x1.telemetry.json")" = 600 ] \
     || fail "telemetry record is not owner-only"
 
   printf '%s\n' '{"prompt":"PRIVATE_PROMPT","token":"sk-private"}' > "$external"
@@ -80,6 +91,7 @@ test_snapshot_status_timestamp_and_integer_controls() {
       || fail "status fixture init failed for $id"
   done
   printf '%s\n' 'selection_reason=matched_dispatch_rule' 'effort=xhigh' >> "$state/fresh-x1.meta"
+  # shellcheck disable=SC2016 # hostile metadata fixture: the command-shaped effort value must reach the snapshot verbatim, not expand here
   printf '%s\n' 'selection_reason=Secret premium strategy from /private/captain' \
     'effort=$(cat ~/.credentials)' >> "$state/partial-x2.meta"
   python3 - "$state" <<'PY'
@@ -131,7 +143,7 @@ test_pi_projection_exact_usage_and_passive_failure() {
   FM_STATE_OVERRIDE="$state" "$PI_GENERATOR" \
     pi-x1 "$generation" "$state/pi-x1.turn-ended" "$state/pi-x1.telemetry.json" "$plugin" \
     || fail "Pi extension generation failed"
-  [ "$(stat -f '%Lp' "$plugin" 2>/dev/null || stat -c '%a' "$plugin")" = 600 ] \
+  [ "$(file_mode "$plugin")" = 600 ] \
     || fail "generated Pi extension is not owner-only"
   assert_no_grep 'message.content' "$plugin" "Pi extension reads message content"
   assert_no_grep 'sessionManager' "$plugin" "Pi extension reads session history"
@@ -255,7 +267,7 @@ test_claude_loopback_allowlist_dedupe_and_cleanup() {
     || fail "Claude privacy self-test failed"
   PATH="$fakebin:$BASE_PATH" FM_STATE_OVERRIDE="$state" "$CLAUDE" \
     start claude-x1 "$tasktmp/telemetry.env" || fail "Claude collector failed to start"
-  [ "$(stat -f '%Lp' "$tasktmp/telemetry.env" 2>/dev/null || stat -c '%a' "$tasktmp/telemetry.env")" = 600 ] \
+  [ "$(file_mode "$tasktmp/telemetry.env")" = 600 ] \
     || fail "Claude launch environment is not owner-only"
   assert_grep "OTEL_LOG_USER_PROMPTS='0'" "$tasktmp/telemetry.env" "prompt logging is not pinned off"
   assert_grep "OTEL_LOG_ASSISTANT_RESPONSES='0'" "$tasktmp/telemetry.env" "response logging is not pinned off"
@@ -263,7 +275,7 @@ test_claude_loopback_allowlist_dedupe_and_cleanup() {
   assert_grep "OTEL_LOG_RAW_API_BODIES='0'" "$tasktmp/telemetry.env" "raw body logging is not pinned off"
 
   set -a
-  # shellcheck disable=SC1090 # Generated owner-only fixture environment.
+  # shellcheck disable=SC1090,SC1091 # Generated owner-only fixture environment.
   . "$tasktmp/telemetry.env"
   set +a
   endpoint=$OTEL_EXPORTER_OTLP_ENDPOINT
@@ -469,20 +481,20 @@ test_claude_status_line_skips_redundant_record_writes() {
     || fail "status-line fixture init failed"
   printf '%s' '{"model":{"id":"claude-sonnet-4-5"}}' \
     | FM_STATE_OVERRIDE="$state" "$CLAUDE" status statusline-x1 "$generation"
-  first=$(stat -f '%i' "$record" 2>/dev/null || stat -c '%i' "$record")
+  first=$(file_inode "$record")
   printf '%s' '{"model":{"id":"claude-sonnet-4-5"}}' \
     | FM_STATE_OVERRIDE="$state" "$CLAUDE" status statusline-x1 "$generation"
-  second=$(stat -f '%i' "$record" 2>/dev/null || stat -c '%i' "$record")
+  second=$(file_inode "$record")
   [ "$first" = "$second" ] || fail "an unchanged status-line render rewrote the telemetry record"
   printf '%s' '{"model":{"id":"claude-opus-4"}}' \
     | FM_STATE_OVERRIDE="$state" "$CLAUDE" status statusline-x1 "$generation"
-  third=$(stat -f '%i' "$record" 2>/dev/null || stat -c '%i' "$record")
+  third=$(file_inode "$record")
   [ "$second" != "$third" ] || fail "a changed status-line model did not update the telemetry record"
   printf '%s' '{"model":{"id":"claude-haiku-4-5"}}' \
     | FM_STATE_OVERRIDE="$state" "$CLAUDE" status statusline-x1 00000000000000000000000000000000
   printf '%s' '{"model":{"id":"claude-haiku-4-5"}}' \
     | FM_STATE_OVERRIDE="$state" "$CLAUDE" status ../statusline-x1 "$generation"
-  fourth=$(stat -f '%i' "$record" 2>/dev/null || stat -c '%i' "$record")
+  fourth=$(file_inode "$record")
   [ "$third" = "$fourth" ] || fail "a foreign generation or task id updated the telemetry record"
   [ ! -e "$state/../.statusline-x1.telemetry.lock" ] \
     || fail "an unvalidated status-line task id created a lock outside the state root"
@@ -553,6 +565,7 @@ test_claude_start_leaves_no_orphan_collector() {
   [ ! -e "$state/orphan-x1.claude-telemetry.json" ] \
     || fail "a failed Claude start retained its collector control record"
   sleep 0.2
+  # shellcheck disable=SC2009 # the full command line is both the match and the failure evidence, and a pgrep pattern would have to re-escape the state path as a regex
   out=$(ps -Ao command= | grep -F "claude-collector $state orphan-x1" | grep -v grep || true)
   [ -z "$out" ] || fail "a failed Claude start left an orphan collector running"$'\n'"$out"
   pass "a failed Claude start publishes no environment and leaves no orphan collector"

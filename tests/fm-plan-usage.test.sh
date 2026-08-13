@@ -21,6 +21,13 @@ PY
   fi
 }
 
+# Portable mode read. Platform-detected, never the `stat -f || stat -c` fallback:
+# GNU `stat -f` means --file-system, so on Linux it prints filesystem details for
+# the file (and fails on the format operand) before the fallback ever runs.
+file_mode() { # <path>
+  if [ "$(uname)" = Darwin ]; then stat -f '%Lp' "$1"; else stat -c '%a' "$1"; fi
+}
+
 make_fake_codex() { # <root>
   local root=$1 fakebin="$1/fakebin"
   mkdir -p "$fakebin"
@@ -136,7 +143,7 @@ test_official_protocol_projection_and_cache() {
   out3=$(run_snapshot "$root" 1785542461) || fail "plan cache refresh failed"
   [ "$(spawn_count "$root/home/calls.log")" = 2 ] || fail "cache did not refresh after 60 seconds"
   json_assert "$out3" 'value["providers"][0]["status"] == "fresh"'
-  [ "$(stat -f '%Lp' "$root/state/.plan-usage-cache.json" 2>/dev/null || stat -c '%a' "$root/state/.plan-usage-cache.json")" = 600 ] \
+  [ "$(file_mode "$root/state/.plan-usage-cache.json")" = 600 ] \
     || fail "plan cache is not owner-only"
 
   python3 - "$root/state/.plan-usage.lock" "$root/lock-ready" <<'PY' &

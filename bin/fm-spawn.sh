@@ -566,6 +566,20 @@ shell_quote() {
   printf "'"
 }
 
+# Replaces every occurrence of a launch-template placeholder in $LAUNCH with a
+# literal value. bash 5.2+ expands an unescaped `&` in a ${var//pat/repl}
+# replacement to the matched text (patsub_replacement), while bash 3.2 keeps it
+# literal, so any value carrying an ampersand - the Claude telemetry env prefix,
+# a path with `&` in it - must be substituted through this loop instead.
+launch_fill() { # <placeholder> <literal value>; edits $LAUNCH in place
+  local placeholder=$1 value=$2 rest=$LAUNCH out=
+  while [ "${rest#*"$placeholder"}" != "$rest" ]; do
+    out=$out${rest%%"$placeholder"*}$value
+    rest=${rest#*"$placeholder"}
+  done
+  LAUNCH=$out$rest
+}
+
 resolve_kimi_binary() {
   local candidate dir fallback
   candidate=$(command -v kimi 2>/dev/null || true)
@@ -644,7 +658,7 @@ effort_flag_for_harness() {
 case "$LAUNCH" in
   *__KIMIBIN__*)
     KIMI_BIN=$(resolve_kimi_binary) || exit 1
-    LAUNCH=${LAUNCH//__KIMIBIN__/$(shell_quote "$KIMI_BIN")}
+    launch_fill __KIMIBIN__ "$(shell_quote "$KIMI_BIN")"
     if [ "$KIND" != secondmate ]; then
       "$FM_ROOT/bin/fm-kimi-turnend-hook.sh" install || {
         echo "error: refusing Kimi spawn because the global turn-end hook could not be installed safely" >&2
@@ -1553,15 +1567,15 @@ if [ -n "$CLAUDE_ENV_FILE" ] && [ -f "$CLAUDE_ENV_FILE" ] && [ ! -L "$CLAUDE_ENV
 fi
 MODELFLAG=$(model_flag_for_harness "$HARNESS" "$MODEL")
 EFFORTFLAG=$(effort_flag_for_harness "$HARNESS" "$EFFORT")
-LAUNCH=${LAUNCH//__MODELFLAG__/$MODELFLAG}
-LAUNCH=${LAUNCH//__EFFORTFLAG__/$EFFORTFLAG}
-LAUNCH=${LAUNCH//__BRIEF__/$sq_brief}
-LAUNCH=${LAUNCH//__TURNEND__/$sq_turnend}
-LAUNCH=${LAUNCH//__PIEXT__/$sq_piext}
-LAUNCH=${LAUNCH//__PITURNEND__/$sq_piturnend}
-LAUNCH=${LAUNCH//__PIWATCH__/$sq_piwatch}
-LAUNCH=${LAUNCH//__CLAUDEENV__/$CLAUDEENV}
-LAUNCH=${LAUNCH//__OPINPUT__/$sq_opinput}
+launch_fill __MODELFLAG__ "$MODELFLAG"
+launch_fill __EFFORTFLAG__ "$EFFORTFLAG"
+launch_fill __BRIEF__ "$sq_brief"
+launch_fill __TURNEND__ "$sq_turnend"
+launch_fill __PIEXT__ "$sq_piext"
+launch_fill __PITURNEND__ "$sq_piturnend"
+launch_fill __PIWATCH__ "$sq_piwatch"
+launch_fill __CLAUDEENV__ "$CLAUDEENV"
+launch_fill __OPINPUT__ "$sq_opinput"
 if [ "$KIND" = secondmate ]; then
   sq_home=$(shell_quote "$PROJ_ABS")
   LAUNCH="FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_HOME=$sq_home $LAUNCH"
