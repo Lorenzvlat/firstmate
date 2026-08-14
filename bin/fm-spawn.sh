@@ -1,12 +1,17 @@
 #!/usr/bin/env bash
 # Spawn a direct report: a crewmate in a treehouse or Orca worktree, or a
 # secondmate in its isolated firstmate home.
-# Usage: fm-spawn.sh <task-id> <project-dir> [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] [--scout]
-#        fm-spawn.sh <task-id> [<firstmate-home>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] --secondmate
+# Usage: fm-spawn.sh <task-id> <project-dir> [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--selection-reason <reason>] [--backend <name>] [--scout]
+#        fm-spawn.sh <task-id> [<firstmate-home>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--selection-reason <reason>] [--backend <name>] --secondmate
 #   --harness <name> is the explicit per-spawn harness/profile adapter. The old
 #   positional harness arg still works for back-compat.
 #   --model <name> and --effort <low|medium|high|xhigh|max> are concrete profile
-#   axes chosen by firstmate at intake. They are only threaded into harnesses whose
+#   axes chosen by firstmate at intake. --selection-reason records only the fixed
+#   model-selection provenance enum explicit_captain_override|matched_dispatch_rule|
+#   configured_default|static_default|quota_fallback|unavailable. It never accepts
+#   rule prose or model reasoning. An omitted reason is always unavailable; the
+#   caller owns provenance and fm-spawn never infers it from how HARNESS resolved.
+#   Model and effort values are only threaded into harnesses whose
 #   installed CLIs were verified to support that axis; unsupported axes are omitted
 #   from that harness's launch rather than guessed.
 #   --backend <name> is the explicit runtime session-provider backend for this
@@ -87,7 +92,7 @@
 # Batch dispatch: pass one or more `id=repo` pairs instead of a single <id> <project>, e.g.
 #     fm-spawn.sh fix-a-k3=projects/foo add-b-q7=projects/bar [--scout]
 #   Each pair re-execs this script in single-task mode, so the single path stays the only
-#   source of truth; shared --scout/--harness/--model/--effort/--backend applies to every pair.
+#   source of truth; shared --scout/--harness/--model/--effort/--selection-reason/--backend applies to every pair.
 #   If config/crew-dispatch.json exists, shared --harness is required for crewmate
 #   and scout batches. The loop lives here, in bash, so callers never hand-write a
 #   multi-task shell loop (the tool shell is zsh, which does not word-split unquoted
@@ -100,6 +105,7 @@
 #                  written by this script; outside the worktree to avoid pi's trust gate)
 #     __PITURNEND__ absolute path to .pi/extensions/fm-primary-turnend-guard.ts in a pi secondmate home
 #     __PIWATCH__   absolute path to .pi/extensions/fm-primary-pi-watch.ts in a pi secondmate home
+#     __CLAUDEENV__ optional source of the owner-only Claude telemetry launch environment
 #     __OPINPUT__   absolute path to the canonical operational-input encoder
 # Verified per-harness turn-end hooks are installed automatically where enabled; some live outside the worktree.
 # Kimi uses one surgically installed Firstmate region in $HOME/.kimi-code/config.toml,
@@ -152,10 +158,12 @@ KIND=ship
 HARNESS_ARG=
 MODEL=
 EFFORT=
+SELECTION_REASON=
 BACKEND_ARG=
 HARNESS_SET=0
 MODEL_SET=0
 EFFORT_SET=0
+SELECTION_REASON_SET=0
 BACKEND_SET=0
 POS=()
 want_value=
@@ -168,6 +176,7 @@ for a in "$@"; do
       harness) HARNESS_ARG=$a; HARNESS_SET=1 ;;
       model) MODEL=$a; MODEL_SET=1 ;;
       effort) EFFORT=$a; EFFORT_SET=1 ;;
+      selection-reason) SELECTION_REASON=$a; SELECTION_REASON_SET=1 ;;
       backend) BACKEND_ARG=$a; BACKEND_SET=1 ;;
       *) echo "error: internal parser state for --$want_value" >&2; exit 1 ;;
     esac
@@ -183,6 +192,8 @@ for a in "$@"; do
     --model=*) MODEL=${a#--model=}; MODEL_SET=1 ;;
     --effort) want_value=effort ;;
     --effort=*) EFFORT=${a#--effort=}; EFFORT_SET=1 ;;
+    --selection-reason) want_value=selection-reason ;;
+    --selection-reason=*) SELECTION_REASON=${a#--selection-reason=}; SELECTION_REASON_SET=1 ;;
     --backend) want_value=backend ;;
     --backend=*) BACKEND_ARG=${a#--backend=}; BACKEND_SET=1 ;;
     *) POS+=("$a") ;;
@@ -192,10 +203,15 @@ done
 [ "$HARNESS_SET" -eq 0 ] || [ -n "$HARNESS_ARG" ] || { echo "error: --harness requires a non-empty value" >&2; exit 1; }
 [ "$MODEL_SET" -eq 0 ] || [ -n "$MODEL" ] || { echo "error: --model requires a non-empty value" >&2; exit 1; }
 [ "$EFFORT_SET" -eq 0 ] || [ -n "$EFFORT" ] || { echo "error: --effort requires a non-empty value" >&2; exit 1; }
+[ "$SELECTION_REASON_SET" -eq 0 ] || [ -n "$SELECTION_REASON" ] || { echo "error: --selection-reason requires a non-empty value" >&2; exit 1; }
 [ "$BACKEND_SET" -eq 0 ] || [ -n "$BACKEND_ARG" ] || { echo "error: --backend requires a non-empty value" >&2; exit 1; }
 case "$EFFORT" in
   ''|low|medium|high|xhigh|max) ;;
   *) echo "error: --effort must be one of low, medium, high, xhigh, max" >&2; exit 1 ;;
+esac
+case "$SELECTION_REASON" in
+  ''|explicit_captain_override|matched_dispatch_rule|configured_default|static_default|quota_fallback|unavailable) ;;
+  *) echo "error: --selection-reason must be a fixed model-selection reason" >&2; exit 1 ;;
 esac
 
 # Backend selection (data/fm-backend-design-d7): explicit --backend, else
@@ -236,6 +252,7 @@ SPAWN_TASK_LOCK=
 SPAWN_TASK_LOCK_HELD=0
 CONFIG_INHERIT_LOCK=
 CONFIG_INHERIT_LOCK_HELD=0
+TELEMETRY_INITIALIZED=0
 
 parse_orca_worktree_result() {
   local raw=$1 rest
@@ -256,6 +273,10 @@ parse_orca_worktree_result() {
 
 spawn_abort_cleanup() {
   local status=$?
+  if [ "$TELEMETRY_INITIALIZED" = 1 ]; then
+    TELEMETRY_INITIALIZED=0
+    FM_STATE_OVERRIDE="$STATE" "$FM_ROOT/bin/fm-claude-telemetry.sh" stop "${ID:-}" >/dev/null 2>&1 || true
+  fi
   if [ "$HERDR_PROJECTION_ABORT_CLEANUP" = 1 ] \
      && [ "$HERDR_PRESENTATION_ORDER_LOCK_HELD" != 1 ]; then
     if ! spawn_herdr_presentation_order_lock_acquire "${HERDR_PROJECTION_ABORT_SESSION:-}"; then
@@ -294,6 +315,7 @@ spawn_abort_cleanup() {
             echo "tasktmp=${TASK_TMP:-}"
             echo "model=${MODEL:-default}"
             echo "effort=${EFFORT:-default}"
+            echo "selection_reason=${SELECTION_REASON:-unavailable}"
             echo "backend=orca"
             echo "orca_worktree_id=$ORCA_WORKTREE_ID"
             [ -z "${ORCA_TERMINAL:-}" ] || echo "terminal=$ORCA_TERMINAL"
@@ -358,6 +380,7 @@ if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in *
   [ -z "$HARNESS_ARG" ] || shared_args+=(--harness "$HARNESS_ARG")
   [ -z "$MODEL" ] || shared_args+=(--model "$MODEL")
   [ -z "$EFFORT" ] || shared_args+=(--effort "$EFFORT")
+  [ -z "$SELECTION_REASON" ] || shared_args+=(--selection-reason "$SELECTION_REASON")
   [ -z "$BACKEND_ARG" ] || shared_args+=(--backend "$BACKEND_ARG")
   for pair in "${POS[@]}"; do
     case "$pair" in
@@ -427,7 +450,7 @@ launch_template() {
     # does NOT suppress the interactive ghost text (verified empirically), so the env
     # var is the correct control. The dim-aware composer reader in fm-tmux-lib.sh is
     # the defense-in-depth backstop for any pane this flag cannot reach.
-    claude) printf '%s' 'CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
+    claude) printf '%s' '__CLAUDEENV__CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
     codex)
       if [ "$kind" = secondmate ]; then
         printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
@@ -496,6 +519,10 @@ case "$ARG3" in
     ;;
 esac
 
+if [ -z "$SELECTION_REASON" ]; then
+  SELECTION_REASON=unavailable
+fi
+
 # config/secondmate-harness may carry optional model/effort tokens alongside the
 # harness ("<harness> [<model>] [<effort>]"). They apply only when this is a
 # --secondmate spawn and no explicit per-spawn harness/raw launch was supplied, so
@@ -537,6 +564,20 @@ shell_quote() {
   printf "'"
   printf '%s' "$1" | sed "s/'/'\\\\''/g"
   printf "'"
+}
+
+# Replaces every occurrence of a launch-template placeholder in $LAUNCH with a
+# literal value. bash 5.2+ expands an unescaped `&` in a ${var//pat/repl}
+# replacement to the matched text (patsub_replacement), while bash 3.2 keeps it
+# literal, so any value carrying an ampersand - the Claude telemetry env prefix,
+# a path with `&` in it - must be substituted through this loop instead.
+launch_fill() { # <placeholder> <literal value>; edits $LAUNCH in place
+  local placeholder=$1 value=$2 rest=$LAUNCH out=
+  while [ "${rest#*"$placeholder"}" != "$rest" ]; do
+    out=$out${rest%%"$placeholder"*}$value
+    rest=${rest#*"$placeholder"}
+  done
+  LAUNCH=$out$rest
 }
 
 resolve_kimi_binary() {
@@ -617,7 +658,7 @@ effort_flag_for_harness() {
 case "$LAUNCH" in
   *__KIMIBIN__*)
     KIMI_BIN=$(resolve_kimi_binary) || exit 1
-    LAUNCH=${LAUNCH//__KIMIBIN__/$(shell_quote "$KIMI_BIN")}
+    launch_fill __KIMIBIN__ "$(shell_quote "$KIMI_BIN")"
     if [ "$KIND" != secondmate ]; then
       "$FM_ROOT/bin/fm-kimi-turnend-hook.sh" install || {
         echo "error: refusing Kimi spawn because the global turn-end hook could not be installed safely" >&2
@@ -1313,6 +1354,17 @@ mkdir -p "$TASK_TMP/gotmp"
 mkdir -p "$STATE"
 STATE_REAL=$(cd "$STATE" && pwd -P)
 TURNEND="$STATE_REAL/$ID.turn-ended"
+TELEMETRY_FILE="$STATE_REAL/$ID.telemetry.json"
+TELEMETRY_GENERATION=
+CLAUDE_ENV_FILE=
+if [ "$KIND" != secondmate ]; then
+  if TELEMETRY_GENERATION=$(FM_STATE_OVERRIDE="$STATE_REAL" \
+      "$FM_ROOT/bin/fm-worker-telemetry-init.sh" "$ID" "$HARNESS" 2>/dev/null); then
+    TELEMETRY_INITIALIZED=1
+  else
+    TELEMETRY_GENERATION=
+  fi
+fi
 exclude_path() {
   local rel=$1 EXCL
   EXCL=$(git -C "$WT" rev-parse --git-path info/exclude 2>/dev/null || true)
@@ -1324,9 +1376,20 @@ if [ "$KIND" != secondmate ]; then
   case "$HARNESS" in
     claude*)
       mkdir -p "$WT/.claude"
-      cat > "$WT/.claude/settings.local.json" <<EOF
+      CLAUDE_ENV_FILE="$TASK_TMP/claude-telemetry.env"
+      if [ -n "$TELEMETRY_GENERATION" ] \
+         && FM_STATE_OVERRIDE="$STATE_REAL" "$FM_ROOT/bin/fm-claude-telemetry.sh" \
+           start "$ID" "$CLAUDE_ENV_FILE" >/dev/null 2>&1; then
+        claude_status_command=$(json_escape "FM_STATE_OVERRIDE=$(shell_quote "$STATE_REAL") $(shell_quote "$FM_ROOT/bin/fm-claude-telemetry.sh") status $(shell_quote "$ID") $(shell_quote "$TELEMETRY_GENERATION")")
+        cat > "$WT/.claude/settings.local.json" <<EOF
+{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"touch '$TURNEND'"}]}]},"statusLine":{"type":"command","command":"$claude_status_command"}}
+EOF
+      else
+        CLAUDE_ENV_FILE=
+        cat > "$WT/.claude/settings.local.json" <<EOF
 {"hooks":{"Stop":[{"hooks":[{"type":"command","command":"touch '$TURNEND'"}]}]}}
 EOF
+      fi
       exclude_path '.claude/settings.local.json'
       ;;
     opencode*)
@@ -1344,16 +1407,21 @@ EOF
       # Written OUTSIDE the worktree: pi's project-trust gate fires on any extension
       # loaded from inside the project (verified live), but an explicit -e path
       # elsewhere loads without a dialog. Lives in state/, cleaned by teardown.
-      cat > "$STATE/$ID.pi-ext.ts" <<EOF
-// Firstmate turn-end signal; written by fm-spawn.
-// Use "turn_end" (fires after each turn the agent finishes), not "agent_end"
-// (fires once, only when the whole run exits): the watcher needs a signal at
-// every turn boundary so an idle crewmate is surfaced, not just at shutdown.
+      if [ -n "$TELEMETRY_GENERATION" ] \
+         && FM_STATE_OVERRIDE="$STATE_REAL" "$FM_ROOT/bin/fm-pi-worker-extension.sh" \
+           "$ID" "$TELEMETRY_GENERATION" "$TURNEND" "$TELEMETRY_FILE" \
+           "$STATE_REAL/$ID.pi-ext.ts" >/dev/null 2>&1; then
+        :
+      else
+        # Telemetry is passive: retain the established turn-end signal even when
+        # its projection could not initialize.
+        cat > "$STATE/$ID.pi-ext.ts" <<EOF
 import { execFile } from "node:child_process";
 export default function (pi: any) {
   pi.on("turn_end", () => execFile("touch", ["$TURNEND"]));
 }
 EOF
+      fi
       ;;
     codex*)
       # codex: turn-end rides the launch command via -c notify=[...] and __TURNEND__.
@@ -1454,6 +1522,7 @@ META_WINDOW=$T
   echo "tasktmp=$TASK_TMP"
   echo "model=${MODEL:-default}"
   echo "effort=${EFFORT:-default}"
+  echo "selection_reason=$SELECTION_REASON"
   # backend= is written only for a non-default (non-tmux) backend, so the
   # default path's meta stays byte-identical (absent backend= means tmux;
   # data/fm-backend-design-d7's P1 compatibility contract).
@@ -1481,7 +1550,7 @@ META_WINDOW=$T
     echo "home=$PROJ_ABS"
     echo "projects=$SECONDMATE_PROJECTS"
   fi
-} > "$STATE/$ID.meta"
+} > "$STATE/$ID.meta" || exit 1
 [ "$BACKEND" = orca ] && ORCA_ABORT_CLEANUP=0
 
 sq_brief=$(shell_quote "$BRIEF")
@@ -1490,16 +1559,23 @@ sq_piext=$(shell_quote "$STATE/$ID.pi-ext.ts")
 sq_piturnend=$(shell_quote "$PROJ_ABS/.pi/extensions/fm-primary-turnend-guard.ts")
 sq_piwatch=$(shell_quote "$PROJ_ABS/.pi/extensions/fm-primary-pi-watch.ts")
 sq_opinput=$(shell_quote "$FM_ROOT/bin/fm-operational-input.sh")
+CLAUDEENV=
+if [ -n "$CLAUDE_ENV_FILE" ] && [ -f "$CLAUDE_ENV_FILE" ] && [ ! -L "$CLAUDE_ENV_FILE" ]; then
+  # Telemetry never gates the launch: an unreadable env file at launch time
+  # degrades to telemetry-off rather than to a worker that never starts.
+  CLAUDEENV="[ -r $(shell_quote "$CLAUDE_ENV_FILE") ] && . $(shell_quote "$CLAUDE_ENV_FILE"); "
+fi
 MODELFLAG=$(model_flag_for_harness "$HARNESS" "$MODEL")
 EFFORTFLAG=$(effort_flag_for_harness "$HARNESS" "$EFFORT")
-LAUNCH=${LAUNCH//__MODELFLAG__/$MODELFLAG}
-LAUNCH=${LAUNCH//__EFFORTFLAG__/$EFFORTFLAG}
-LAUNCH=${LAUNCH//__BRIEF__/$sq_brief}
-LAUNCH=${LAUNCH//__TURNEND__/$sq_turnend}
-LAUNCH=${LAUNCH//__PIEXT__/$sq_piext}
-LAUNCH=${LAUNCH//__PITURNEND__/$sq_piturnend}
-LAUNCH=${LAUNCH//__PIWATCH__/$sq_piwatch}
-LAUNCH=${LAUNCH//__OPINPUT__/$sq_opinput}
+launch_fill __MODELFLAG__ "$MODELFLAG"
+launch_fill __EFFORTFLAG__ "$EFFORTFLAG"
+launch_fill __BRIEF__ "$sq_brief"
+launch_fill __TURNEND__ "$sq_turnend"
+launch_fill __PIEXT__ "$sq_piext"
+launch_fill __PITURNEND__ "$sq_piturnend"
+launch_fill __PIWATCH__ "$sq_piwatch"
+launch_fill __CLAUDEENV__ "$CLAUDEENV"
+launch_fill __OPINPUT__ "$sq_opinput"
 if [ "$KIND" = secondmate ]; then
   sq_home=$(shell_quote "$PROJ_ABS")
   LAUNCH="FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_HOME=$sq_home $LAUNCH"
@@ -1588,4 +1664,5 @@ if [ "$KIND" = secondmate ]; then
   fi
 fi
 
+TELEMETRY_INITIALIZED=0
 echo "spawned $ID harness=$HARNESS kind=$KIND mode=$MODE yolo=$YOLO window=$META_WINDOW worktree=$WT"

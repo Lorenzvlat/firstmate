@@ -31,6 +31,17 @@ The `/calm` command replaces the file atomically before changing live presentati
 The extension reloads this preference on every Pi `session_start`, including startup, new, resume, fork, and reload reasons.
 This preference is local to each Firstmate home and is not part of secondmate inherited configuration.
 
+## Manual Claude plan snapshot (config/plan-usage-manual.json)
+
+Manual Claude subscription-plan input is disabled by default.
+A dashboard service must set `FM_PLAN_USAGE_MANUAL=1` before startup to enable the fixed local `config/plan-usage-manual.json` source under the effective Firstmate home.
+The file is local, gitignored, owner-only, not inherited into secondmate homes, and has no browser write path.
+[`worker-telemetry.md`](worker-telemetry.md#disabled-manual-claude-boundary) owns its exact schema, containment, expiry, projection, and refusal contract.
+
+Claude worker telemetry itself is deliberately the opposite: it is always on for newly launched non-secondmate Claude workers and has no configuration toggle, because it is task-scoped, passive, privacy-pinned, and fully removed by that task's own cleanup.
+Its launch also writes a task-local `statusLine` command into the worker worktree's git-excluded `.claude/settings.local.json`, which overrides any global status line for the life of that task only.
+`bin/fm-claude-telemetry.sh stop <task-id>` is the kill path for a single misbehaving collector; [`worker-telemetry.md`](worker-telemetry.md#claude-producer) owns the rest.
+
 ## Backlog backend (.tasks.toml / config/backlog-backend)
 
 The tracked `.tasks.toml` pins the default `tasks-axi` markdown backend to `data/backlog.md`, with `done_keep = 10` and an archive at `data/done-archive.md`.
@@ -205,9 +216,9 @@ For Pi secondmate launches, `fm-spawn.sh` starts Pi with `-e` pointed at the sec
 ## Crew dispatch profiles (config/crew-dispatch.json)
 
 `config/crew-dispatch.json` is an optional local, gitignored file containing natural-language rules that firstmate reads before dispatching a crewmate or scout.
-The shell scripts do not match those rules; firstmate chooses the best matching rule with judgment, resolves its profile object or array under the operating contract in `AGENTS.md` section 4, and passes only concrete `--harness`, `--model`, and `--effort` flags to `fm-spawn.sh`.
+The shell scripts do not match those rules; firstmate chooses the best matching rule with judgment, resolves its profile object or array under the operating contract in `AGENTS.md` section 4, and passes only concrete `--harness`, `--model`, `--effort`, and fixed `--selection-reason` values to `fm-spawn.sh`.
 When the file exists, `fm-spawn.sh` enforces that contract by refusing crewmate and scout spawns that lack an explicit harness (`--harness`, a positional adapter, or a raw launch command).
-Batch spawns satisfy the same requirement with a shared `--harness`.
+Batch spawns satisfy the same requirement with shared concrete profile and selection-reason flags.
 Secondmate spawns are exempt and still resolve through `config/secondmate-harness` and its optional model and effort tokens.
 This section is the single owner of the canonical schema and its per-field semantics; `AGENTS.md` section 4 owns the dispatch and array-selection procedure.
 
@@ -370,6 +381,7 @@ FM_PROJECTS_OVERRIDE=    # alternate projects dir, mainly for tests
 FM_CONFIG_OVERRIDE=      # alternate config dir, mainly for tests
 FM_PROC_ROOT_OVERRIDE=   # alternate /proc root for the Linux process-identity read in fm-wake-lib.sh, mainly for tests
 FM_BACKEND=             # optional runtime backend override for new spawns; tmux/herdr/zellij/orca/cmux support ship/scout spawns, codex-app is not accepted
+FM_PLAN_USAGE_MANUAL=0  # only 1, set before a dashboard service starts, enables the disabled-by-default manual Claude plan source ("Manual Claude plan snapshot" above)
 HERDR_SESSION=default  # herdr-only: named session for normal backend ops; not enough for destructive cleanup (docs/herdr-backend.md)
 FM_BACKEND_HERDR_COMPOSER_LINES=20  # herdr-only: tail lines scanned by composer-state guard/fallback paths; idle-baseline submit confirmation uses agent-state
 FM_BACKEND_HERDR_IDLE_RE='^Type a message\.\.\.$'  # herdr-only: empty-composer placeholder regex after shared ghost extraction plus border and prompt stripping

@@ -1034,9 +1034,17 @@ cleanup_firstmate_home_children() {
     fi
     remove_grok_turnend_auth "$sub_state" "$child_id"
     remove_kimi_turnend_auth "$sub_state" "$child_id"
+    FM_STATE_OVERRIDE="$sub_state" "$home/bin/fm-claude-telemetry.sh" stop "$child_id" >/dev/null 2>&1 || true
     remove_pr_poll_artifacts "$sub_state" "$child_id" || return 1
     rm -f "$sub_state/$child_id.status" "$sub_state/$child_id.turn-ended" \
       "$sub_state/$child_id.meta" "$sub_state/$child_id.pi-ext.ts" \
+      "$sub_state/$child_id.telemetry.json" "$sub_state/.$child_id.telemetry.lock" \
+      "$sub_state/.$child_id.telemetry.json.tmp" \
+      "$sub_state/$child_id.claude-telemetry.json" \
+      "$sub_state/.$child_id.claude-telemetry.json.tmp" "$sub_state/.$child_id.claude-live" \
+      "$sub_state/.$child_id.claude-ready.json" "$sub_state/.$child_id.claude-ready.json.tmp" \
+      "$sub_state/.$child_id.claude-bootstrap.json" \
+      "$sub_state/.$child_id.claude-bootstrap.json.tmp" \
       "$sub_state/$child_id.grok-turnend-token" "$sub_state/$child_id.kimi-turnend-token" \
       "$sub_state/$child_id.herdr-nm-activity"
   done
@@ -1223,13 +1231,22 @@ fi
 remove_grok_turnend_auth "$STATE" "$ID"
 remove_kimi_turnend_auth "$STATE" "$ID"
 fm_backend_clear_transition "$BACKEND" "$STATE" "$T" || true
+# Stop only this task's identity-checked loopback collector. This is best effort:
+# telemetry never controls worker cleanup or any shared daemon.
+FM_STATE_OVERRIDE="$STATE" "$FM_ROOT/bin/fm-claude-telemetry.sh" stop "$ID" >/dev/null 2>&1 || true
 # Remove the per-task temp root (/tmp/fm-<id>/, incl. its gotmp/) recorded by spawn.
 # Read before the state-file rm below; empty (pre-fix tasks without tasktmp=) is a no-op.
 [ -n "$TASK_TMP" ] && rm -rf "$TASK_TMP"
 remove_pr_poll_artifacts "$STATE" "$ID" || exit 1
 rm -f "$STATE/$ID.status" "$STATE/$ID.turn-ended" "$STATE/$ID.meta" \
-  "$STATE/$ID.pi-ext.ts" "$STATE/$ID.grok-turnend-token" \
-  "$STATE/$ID.kimi-turnend-token" "$STATE/$ID.herdr-nm-activity"
+  "$STATE/$ID.pi-ext.ts" "$STATE/$ID.telemetry.json" \
+  "$STATE/.$ID.telemetry.lock" "$STATE/.$ID.telemetry.json.tmp" \
+  "$STATE/$ID.claude-telemetry.json" "$STATE/.$ID.claude-telemetry.json.tmp" \
+  "$STATE/.$ID.claude-live" \
+  "$STATE/.$ID.claude-ready.json" "$STATE/.$ID.claude-ready.json.tmp" \
+  "$STATE/.$ID.claude-bootstrap.json" "$STATE/.$ID.claude-bootstrap.json.tmp" \
+  "$STATE/$ID.grok-turnend-token" "$STATE/$ID.kimi-turnend-token" \
+  "$STATE/$ID.herdr-nm-activity"
 if [ "$KIND" != scout ] && [ "$KIND" != secondmate ] && [ "$MODE" != local-only ]; then
   "$FM_ROOT/bin/fm-fleet-sync.sh" "$PROJ" || true
 fi

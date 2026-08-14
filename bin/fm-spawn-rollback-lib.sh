@@ -16,8 +16,15 @@ fm_spawn_identity_rollback() { # <root> <home> <state> <task-id> <kind> <task-tm
         return 1
         ;;
     esac
+    FM_STATE_OVERRIDE="$state" "$root/bin/fm-claude-telemetry.sh" stop "$id" >/dev/null 2>&1 || true
     rm -f "$state/$id.status" "$state/$id.turn-ended" \
-      "$state/$id.pi-ext.ts" "$state/$id.herdr-nm-activity" "$meta"
+      "$state/$id.pi-ext.ts" "$state/$id.telemetry.json" \
+      "$state/.$id.telemetry.lock" "$state/.$id.telemetry.json.tmp" \
+      "$state/$id.claude-telemetry.json" "$state/.$id.claude-telemetry.json.tmp" \
+      "$state/.$id.claude-live" \
+      "$state/.$id.claude-ready.json" "$state/.$id.claude-ready.json.tmp" \
+      "$state/.$id.claude-bootstrap.json" "$state/.$id.claude-bootstrap.json.tmp" \
+      "$state/$id.herdr-nm-activity" "$meta"
     return 0
   fi
   if FM_HOME="$home" "$root/bin/fm-teardown.sh" "$id" --force; then

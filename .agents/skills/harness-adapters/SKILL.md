@@ -103,6 +103,10 @@ When changing any primary watcher adapter, update `docs/supervision-protocols/`,
 ## Launch profile axes
 
 `bin/fm-spawn.sh` accepts concrete `--harness`, `--model`, and `--effort` values chosen by firstmate at intake.
+It also accepts one fixed `--selection-reason` provenance code for safe telemetry.
+Use `explicit_captain_override` for an explicit per-task captain choice, `matched_dispatch_rule` for a single profile selected by the best matching configured rule, `configured_default` for a single configured default profile, `static_default` for the static harness/default path, `quota_fallback` for a profile-array candidate selected through the required quota comparison, and `unavailable` when no one of those facts is established.
+Never put rule prose, prompts, strategy, commands, paths, logs, or model reasoning into this field.
+[`docs/worker-telemetry.md`](../../../docs/worker-telemetry.md) owns the projected codes and fixed display labels.
 Do not make the shell scripts parse or match natural-language dispatch rules.
 
 Effort precedence is an explicit per-task captain instruction first, then any applicable standing dispatch profile or secondmate pin, then the generic fallback below.
@@ -175,6 +179,7 @@ First launch in a fresh worktree, or first ever on a machine, may show a trust o
 After every spawn, peek the pane within about 20 seconds.
 If such a dialog is showing, accept it from an active firstmate session using `FM_HOME=<this-firstmate-home> bin/fm-send.sh <window> --key Enter`, or the choice the dialog requires, unless `FM_HOME` is already set to the active firstmate home; verify the brief started processing.
 
+New Claude crewmates may receive passive status-line and loopback OTel model/token projection when its privacy self-test succeeds; [`docs/worker-telemetry.md`](../../../docs/worker-telemetry.md) owns the complete source and failure contract.
 Claude renders a predicted-next-prompt suggestion as dim/faint text inside an otherwise-empty composer after a turn completes.
 A plain `tmux capture-pane` cannot tell that ghost text apart from typed text.
 Firstmate launches every claude crewmate and secondmate with `CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false`, scoped to firstmate-launched agents through `bin/fm-spawn.sh`, so it never touches the captain's global config.
@@ -276,8 +281,9 @@ Project trust dialog can appear on the first pi run in any not-yet-trusted direc
 Accept with Enter.
 The decision persists per path in `~/.pi/agent/trust.json`, so later spawns in the same worktree slot skip it.
 
-`fm-spawn` keeps the turn-end extension in `state/`, outside the worktree, because project-local extension files make the trust gate strictly worse and pollute the project.
+`fm-spawn` keeps the generated turn-end and telemetry extension in `state/`, outside the worktree, because project-local extension files make the trust gate strictly worse and pollute the project.
 The extension must listen for pi's `turn_end` event, not `agent_end`, so the watcher wakes after each completed turn instead of only when the whole agent run exits.
+[`docs/worker-telemetry.md`](../../../docs/worker-telemetry.md) owns the generated extension's independent passive model/token projection contract.
 Pi sets `PI_CODING_AGENT=true` for its children; this is its harness-detection env marker.
 
 **Primary-session guard fact (verified 2026-07-09, Pi 0.80.5).**

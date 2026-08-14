@@ -53,26 +53,64 @@ pass() {
 # --- self-cleaning temp root ------------------------------------------------
 #
 # fm_test_tmproot <prefix> echoes a fresh temp dir and registers it for removal
-# on EXIT. The first call installs the cleanup trap. A test file that needs
-# extra teardown (e.g. killing a daemon) should define its own EXIT trap and
-# call fm_test_cleanup from inside it so registered dirs are still removed.
+# on EXIT. Sourcing this library installs the cleanup trap. A test file that
+# needs extra teardown (e.g. killing a daemon) should define its own EXIT trap
+# and call fm_test_cleanup from inside it so registered dirs are still removed.
 
 FM_TEST_CLEANUP_DIRS=()
 
+# A temp root is almost always taken as `TMP_ROOT=$(fm_test_tmproot ...)`, so the
+# array append below lands in a command-substitution subshell and the sourcing
+# shell never sees it - which is also where the EXIT trap used to be installed,
+# so it fired on that subshell instead of on the suite. Registered roots are
+# therefore recorded in this file, which outlives the subshell, and the trap is
+# installed here in the sourcing shell (bash does not inherit an EXIT trap into a
+# subshell, so only the suite itself ever cleans up).
+#
+# Cleanup retires task-scoped Claude telemetry collectors before removing the
+# roots: a suite that drives the real fm-spawn with a claude harness starts one
+# per worker, and a collector exits only on the explicit stop that
+# teardown/rollback issues, so deleting the state directory alone would leave a
+# live loopback listener behind after the suite ends.
+#
+# The registry name is derived from the sourcing shell's own PID rather than
+# created here: $$ is stable inside the command-substitution subshell that calls
+# fm_test_tmproot, and the file itself is created by that first append. A suite
+# that never registers a root therefore creates no registry file at all, even
+# when it replaces the EXIT trap below without calling fm_test_cleanup. Any file
+# left by a dead shell that once held this PID is cleared at source time.
+FM_TEST_CLEANUP_REGISTRY="${TMPDIR:-/tmp}/fm-test-cleanup.${UID:-0}.$$"
+rm -f "$FM_TEST_CLEANUP_REGISTRY"
+
 fm_test_cleanup() {
-  local d
+  local d control id
+  if [ -f "$FM_TEST_CLEANUP_REGISTRY" ]; then
+    while IFS= read -r d; do
+      [ -n "$d" ] && [ -d "$d" ] || continue
+      while IFS= read -r -d '' control; do
+        id=$(basename "$control" .claude-telemetry.json)
+        FM_STATE_OVERRIDE="$(dirname "$control")" \
+          "$ROOT/bin/fm-claude-telemetry.sh" stop "$id" >/dev/null 2>&1 || true
+      done < <(find "$d" -type f -name '*.claude-telemetry.json' -print0 2>/dev/null)
+    done < "$FM_TEST_CLEANUP_REGISTRY"
+    while IFS= read -r d; do
+      [ -n "$d" ] && rm -rf "$d"
+    done < "$FM_TEST_CLEANUP_REGISTRY"
+    rm -f "$FM_TEST_CLEANUP_REGISTRY"
+  fi
   for d in "${FM_TEST_CLEANUP_DIRS[@]:-}"; do
     [ -n "$d" ] && rm -rf "$d"
   done
+  return 0
 }
+
+trap fm_test_cleanup EXIT
 
 fm_test_tmproot() {
   local prefix=${1:-fm-test} root
   root=$(mktemp -d "${TMPDIR:-/tmp}/${prefix}.XXXXXX")
-  if [ "${#FM_TEST_CLEANUP_DIRS[@]}" -eq 0 ]; then
-    trap fm_test_cleanup EXIT
-  fi
   FM_TEST_CLEANUP_DIRS+=("$root")
+  printf '%s\n' "$root" >> "$FM_TEST_CLEANUP_REGISTRY"
   printf '%s\n' "$root"
 }
 

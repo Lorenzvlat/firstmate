@@ -39,6 +39,8 @@ For herdr, that pane fallback trusts a native `busy` verdict outright, but corro
 For whole-fleet read-only review, `bin/fm-fleet-snapshot.sh --json` emits schema `fm-fleet-snapshot.v1` from the backlog, task metadata, current crew state, endpoint probes, PR/report pointers, scout reports, bounded current summaries from registered secondmate homes, and secondmate return-channel guidance.
 `bin/fm-fleet-view.sh` renders that snapshot as Markdown for humans, while `bin/fm-bearings-snapshot.sh` provides the bounded bearings projection, so both views consume one structured contract instead of reparsing raw fleet files.
 The script header owns the exact JSON schema.
+The independent fixed commands `bin/fm-worker-telemetry-snapshot.sh --json` and `bin/fm-plan-usage-snapshot.sh --json` expose bounded model/token and subscription-plan projections without adding vendor reads to the lifecycle snapshot.
+[`worker-telemetry.md`](worker-telemetry.md) owns those contracts, source boundaries, privacy controls, and unavailable states.
 
 ### Registered secondmate current state
 
