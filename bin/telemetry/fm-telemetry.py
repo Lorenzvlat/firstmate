@@ -287,7 +287,6 @@ def atomic_bytes(path: Path, data: bytes, max_bytes: int) -> None:
             stream.flush()
             os.fsync(stream.fileno())
         os.replace(tmp, path)
-        os.chmod(path, 0o600)
     finally:
         try:
             tmp.unlink()
@@ -1913,16 +1912,8 @@ def unavailable_codex(reason: str) -> dict[str, Any]:
     }
 
 
-def manual_claude_plan(config: Path, enabled: bool) -> dict[str, Any]:
-    if not enabled:
-        return claude_plan()
-    try:
-        root = state_root(str(config))
-        raw = read_secure_json(root / "plan-usage-manual.json", root, 16 * 1024, owner_only=True)
-    except (OSError, ValueError, json.JSONDecodeError, UnicodeError):
-        record = claude_plan()
-        record["reason"] = "source_error"
-        return record
+def project_manual_claude(raw: Any) -> dict[str, Any]:
+    """Validate and project the single fm-plan-usage-manual.v1 contract."""
     expected = {"schema", "provider", "plan", "observedAt", "expiresAt", "windows"}
     if not isinstance(raw, dict) or set(raw) != expected:
         record = claude_plan()
@@ -1992,6 +1983,106 @@ def manual_claude_plan(config: Path, enabled: bool) -> dict[str, Any]:
         record["reason"] = "expired"
         return record
     return result
+
+
+def manual_claude_plan(config: Path, enabled: bool) -> dict[str, Any]:
+    if not enabled:
+        return claude_plan()
+    try:
+        root = state_root(str(config))
+        raw = read_secure_json(root / "plan-usage-manual.json", root, 16 * 1024, owner_only=True)
+    except (OSError, ValueError, json.JSONDecodeError, UnicodeError):
+        record = claude_plan()
+        record["reason"] = "source_error"
+        return record
+    return project_manual_claude(raw)
+
+
+def prompt_line(label: str, max_length: int = 64) -> str:
+    sys.stderr.write(label)
+    sys.stderr.flush()
+    value = sys.stdin.readline(max_length + 2)
+    if not value or not value.endswith("\n") or len(value.rstrip("\n")) > max_length:
+        raise ValueError("invalid input")
+    return value.rstrip("\n")
+
+
+def prompt_enum(label: str, allowed: set[str]) -> str:
+    value = prompt_line(label)
+    if value not in allowed:
+        raise ValueError("invalid input")
+    return value
+
+
+def prompt_integer(label: str, minimum: int, maximum: int) -> int:
+    value = prompt_line(label)
+    if not re.fullmatch(r"0|[1-9][0-9]*", value, re.ASCII):
+        raise ValueError("invalid input")
+    parsed = int(value)
+    if parsed < minimum or parsed > maximum:
+        raise ValueError("invalid input")
+    return parsed
+
+
+def prompt_iso(label: str) -> str:
+    value = prompt_line(label)
+    if parse_iso(value, future_slack=None) is None:
+        raise ValueError("invalid input")
+    return value
+
+
+def manual_plan_import(config: Path) -> None:
+    root = state_root(str(config))
+    target = root / "plan-usage-manual.json"
+    if target.exists() or target.is_symlink():
+        secure_regular(target, root, 16 * 1024, owner_only=True)
+    print("Enter values transcribed from Claude's interactive usage screen. Text, pasted UI output, and JSON are not accepted.", file=sys.stderr)
+    plan = prompt_enum(
+        "Claude plan (free|pro|max|team|business|enterprise|edu|unknown): ", CLAUDE_PLAN_ENUM
+    )
+    observed_at = prompt_iso("Observed at (UTC YYYY-MM-DDTHH:MM:SS.mmmZ): ")
+    expires_at = prompt_iso("Expires at (UTC YYYY-MM-DDTHH:MM:SS.mmmZ): ")
+    count = prompt_integer("Number of usage windows (1-12): ", 1, 12)
+    windows = []
+    for ordinal in range(1, count + 1):
+        print(f"Window {ordinal}:", file=sys.stderr)
+        slot = prompt_enum("  Slot (primary|secondary): ", {"primary", "secondary"})
+        used = prompt_integer("  Used percent (0-100): ", 0, 100)
+        duration = prompt_integer("  Window duration in minutes: ", 1, MAX_SAFE_INTEGER // 60)
+        reset_iso = prompt_iso("  Resets at (UTC YYYY-MM-DDTHH:MM:SS.mmmZ): ")
+        reset_epoch = parse_iso(reset_iso, future_slack=None)
+        if reset_epoch is None or not reset_epoch.is_integer():
+            raise ValueError("invalid input")
+        windows.append({
+            "slot": slot,
+            "usedPercent": used,
+            "windowDurationMins": duration,
+            "resetsAt": int(reset_epoch),
+        })
+    raw = {
+        "schema": "fm-plan-usage-manual.v1",
+        "provider": "claude",
+        "plan": plan,
+        "observedAt": observed_at,
+        "expiresAt": expires_at,
+        "windows": windows,
+    }
+    projected = project_manual_claude(raw)
+    if projected.get("status") != "manual" or projected.get("reason") != "manual_snapshot":
+        raise ValueError("invalid input")
+    atomic_json(target, root, raw, 16 * 1024)
+
+
+def manual_plan_clear(config: Path) -> None:
+    root = state_root(str(config))
+    target = root / "plan-usage-manual.json"
+    if not target.exists() and not target.is_symlink():
+        return
+    before = secure_regular(target, root, 16 * 1024, owner_only=True)
+    current = target.lstat()
+    if (current.st_dev, current.st_ino) != (before.st_dev, before.st_ino):
+        raise ValueError("unsafe target")
+    target.unlink()
 
 
 def snapshot_plan(root: Path, manual_enabled: bool, config: Path) -> dict[str, Any]:
@@ -2089,6 +2180,12 @@ def main(argv: list[str]) -> int:
             if argv[2] not in {"0", "1"}:
                 return 2
             print(json.dumps(snapshot_plan(state_root(argv[1]), enabled, Path(argv[3])), separators=(",", ":")))
+            return 0
+        if action == "plan-manual-import" and len(argv) == 2:
+            manual_plan_import(Path(argv[1]))
+            return 0
+        if action == "plan-manual-clear" and len(argv) == 2:
+            manual_plan_clear(Path(argv[1]))
             return 0
     except (OSError, ValueError, json.JSONDecodeError, UnicodeError):
         return 1

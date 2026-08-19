@@ -301,7 +301,8 @@ Worker token totals are never converted into a plan percentage.
 A service may opt into an owner-maintained manual Claude snapshot only by setting `FM_PLAN_USAGE_MANUAL=1` before it starts.
 The default and every other value keep the manual source disabled.
 The fixed source is `config/plan-usage-manual.json` under the effective Firstmate home or its test-only `FM_CONFIG_OVERRIDE`.
-There is no browser read/write route, mutation command, credential access, terminal automation, or UI automation for this file.
+The only supported mutation command is the local guided `bin/fm-plan-usage-manual.sh set|clear` helper, whose header and `--help` own its exact mechanics.
+There is no browser read/write route, arbitrary mutation input, credential access, terminal automation, or UI automation for this file.
 
 The private input schema is:
 

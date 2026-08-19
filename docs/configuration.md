@@ -35,6 +35,8 @@ This preference is local to each Firstmate home and is not part of secondmate in
 
 Manual Claude subscription-plan input is disabled by default.
 A dashboard service must set `FM_PLAN_USAGE_MANUAL=1` before startup to enable the fixed local `config/plan-usage-manual.json` source under the effective Firstmate home.
+Run `bin/fm-plan-usage-manual.sh set` to transcribe the bounded numeric values and UTC times from Claude's interactive `/usage` screen, or `bin/fm-plan-usage-manual.sh clear` to remove only that snapshot.
+An already opted-in dashboard reads a successful set or clear on its next refresh without restarting Herdr or a shared daemon.
 The file is local, gitignored, owner-only, not inherited into secondmate homes, and has no browser write path.
 [`worker-telemetry.md`](worker-telemetry.md#disabled-manual-claude-boundary) owns its exact schema, containment, expiry, projection, and refusal contract.
 
