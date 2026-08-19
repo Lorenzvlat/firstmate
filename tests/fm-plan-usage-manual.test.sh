@@ -89,21 +89,20 @@ PY
 }
 
 test_hostile_malformed_range_and_expiry_keep_prior() {
-  local root file before hostile malformed malformed_reset range duration expired case_input
+  local root file before hostile marker malformed malformed_reset range duration expired case_input
   root="$TMP_ROOT/refusals"
   mkdir -p "$root/config"
   run_set "$root/config" >/dev/null 2>&1 || fail "prior snapshot fixture failed"
   file="$root/config/plan-usage-manual.json"
   before=$(shasum -a 256 "$file")
 
-  # shellcheck disable=SC2016 # Literal command substitution is hostile input.
-  hostile='$(touch /tmp/fm-plan-usage-importer-must-not-execute)'
-  rm -f /tmp/fm-plan-usage-importer-must-not-execute
+  marker="$root/must-not-execute"
+  hostile="\$(touch $marker)"
   case_input="$hostile
 "
   run_set "$root/config" "$case_input" >/dev/null 2>&1 \
     && fail "hostile plan input was accepted"
-  [ ! -e /tmp/fm-plan-usage-importer-must-not-execute ] || fail "hostile input executed"
+  [ ! -e "$marker" ] || fail "hostile input executed"
 
   malformed='pro
 2026-08-01 00:00:00Z
@@ -215,7 +214,124 @@ test_clear_only_fixed_snapshot() {
   [ "$(cat "$sibling")" = keep ] || fail "clear affected a sibling file"
   FM_CONFIG_OVERRIDE="$root/config" "$IMPORTER" clear >/dev/null \
     || fail "absent clear was not idempotent"
-  pass "clear removes only the fixed manual snapshot and is idempotent"
+
+  run_set "$root/config" >/dev/null 2>&1 || fail "loose-mode clear fixture failed"
+  chmod 644 "$root/config/plan-usage-manual.json"
+  FM_CONFIG_OVERRIDE="$root/config" "$IMPORTER" clear >/dev/null \
+    || fail "clear refused a current-user-owned loose-mode regular snapshot"
+  [ ! -e "$root/config/plan-usage-manual.json" ] || fail "clear kept the loose-mode snapshot"
+
+  python3 - "$root/config/plan-usage-manual.json" <<'PY'
+from pathlib import Path
+import sys
+path = Path(sys.argv[1])
+path.write_bytes(b"x" * (16 * 1024 + 1))
+path.chmod(0o600)
+PY
+  FM_CONFIG_OVERRIDE="$root/config" "$IMPORTER" clear >/dev/null \
+    || fail "clear refused a current-user-owned oversized regular snapshot"
+  [ ! -e "$root/config/plan-usage-manual.json" ] || fail "clear kept the oversized snapshot"
+  [ "$(cat "$sibling")" = keep ] || fail "recovery clears affected a sibling file"
+  pass "clear removes only the fixed owned regular snapshot regardless of mode or size"
+}
+
+test_bounded_non_echoing_retries() {
+  local root file before out retry_input exhausted conflict_input conflict_exhausted
+  root="$TMP_ROOT/retries"
+  mkdir -p "$root/config"
+  retry_input='PRIVATE_BAD_PLAN_ONE
+PRIVATE_BAD_PLAN_TWO
+PRIVATE_BAD_PLAN_THREE
+pro
+2026-08-01T00:00:00.000Z
+2026-08-01T01:00:00.000Z
+1
+primary
+40
+300
+2026-08-01T00:30:00.000Z
+'
+  out=$(run_set "$root/config" "$retry_input" 2>&1) \
+    || fail "three bounded plan retries did not recover: $out"
+  assert_not_contains "$out" PRIVATE_BAD_PLAN "retry diagnostics reflected a rejected value"
+
+  file="$root/config/plan-usage-manual.json"
+  before=$(shasum -a 256 "$file")
+  exhausted='bad-one
+bad-two
+bad-three
+bad-four
+pro
+'
+  run_set "$root/config" "$exhausted" >/dev/null 2>&1 \
+    && fail "a fourth invalid plan value did not exhaust retries"
+  [ "$(shasum -a 256 "$file")" = "$before" ] \
+    || fail "exhausted retries changed the prior snapshot"
+
+  conflict_input='pro
+2026-08-01T00:00:00.000Z
+2026-08-01T01:00:00.000Z
+2
+primary
+40
+300
+2026-08-01T00:30:00.000Z
+primary
+50
+300
+2026-08-01T00:40:00.000Z
+secondary
+50
+10080
+2026-08-08T00:00:00.000Z
+'
+  out=$(run_set "$root/config" "$conflict_input" 2>&1) \
+    || fail "conflicting identity retry did not recover: $out"
+  assert_contains "$out" 'Window identity conflicts' "identity conflict did not produce a generic retry"
+
+  before=$(shasum -a 256 "$file")
+  conflict_exhausted='pro
+2026-08-01T00:00:00.000Z
+2026-08-01T01:00:00.000Z
+2
+primary
+40
+300
+2026-08-01T00:30:00.000Z
+primary
+50
+300
+2026-08-01T00:40:00.000Z
+primary
+50
+300
+2026-08-01T00:40:00.000Z
+primary
+50
+300
+2026-08-01T00:40:00.000Z
+primary
+50
+300
+2026-08-01T00:40:00.000Z
+'
+  run_set "$root/config" "$conflict_exhausted" >/dev/null 2>&1 \
+    && fail "a fourth conflicting identity did not exhaust retries"
+  [ "$(shasum -a 256 "$file")" = "$before" ] \
+    || fail "exhausted identity retries changed the prior snapshot"
+  pass "invalid fields and conflicting identities receive at most three non-echoing retries"
+}
+
+test_missing_python_has_distinct_diagnostic() {
+  local root fakebin out
+  root="$TMP_ROOT/missing-python"
+  fakebin="$root/fakebin"
+  mkdir -p "$root/config" "$fakebin"
+  out=$(PATH="$fakebin" /bin/bash "$IMPORTER" clear 2>&1) \
+    && fail "manual importer succeeded without python3"
+  assert_contains "$out" 'python3 is required' "missing python3 did not get a distinct diagnostic"
+  assert_not_contains "$out" 'unsafe clear target' "missing python3 was misreported as an unsafe target"
+  pass "missing python3 is reported distinctly before set or clear"
 }
 
 test_help_owns_guided_boundary
@@ -223,3 +339,5 @@ test_success_permissions_and_manual_projection
 test_hostile_malformed_range_and_expiry_keep_prior
 test_permissions_symlink_containment_and_atomic_failure
 test_clear_only_fixed_snapshot
+test_bounded_non_echoing_retries
+test_missing_python_has_distinct_diagnostic

@@ -16,8 +16,11 @@
 # All input is validated through the projection's existing schema boundary
 # before an owner-only atomic replacement of the fixed effective-home
 # config/plan-usage-manual.json. Existing symlinks, unsafe files, and unsafe
-# config roots are refused. A failed input, validation, or write keeps the prior
-# valid snapshot intact. `clear` validates and removes only that fixed file.
+# config roots are refused. Each invalid field or conflicting window identity
+# receives at most three generic retries without reflecting the rejected value.
+# A failed input, validation, or write keeps the prior valid snapshot intact.
+# `clear` removes only a contained current-user-owned direct regular snapshot,
+# including one whose mode is loose or whose size exceeds the reader limit.
 # FM_HOME selects the effective home; FM_CONFIG_OVERRIDE is test-only.
 # Manual projection remains disabled unless the dashboard service was started
 # with FM_PLAN_USAGE_MANUAL=1. An already opted-in dashboard reads a successful
@@ -41,6 +44,8 @@ Transcribe the numeric values and UTC times shown by Claude's interactive
 /usage screen. Do not paste the screen, terminal output, prose, logs, account
 details, credentials, or JSON. Reset times must use canonical UTC form
 YYYY-MM-DDTHH:MM:SS.000Z because the schema stores whole Unix seconds.
+An invalid field or conflicting window identity receives at most three retries;
+the rejected value is never printed by this command.
 
 The manual source is disabled by default. Start the dashboard service with
 FM_PLAN_USAGE_MANUAL=1 to opt in. Once opted in, set and clear take effect on
@@ -49,6 +54,14 @@ EOF
 }
 
 [ "$#" -eq 1 ] || { usage >&2; exit 2; }
+case $1 in
+  set|clear)
+    command -v python3 >/dev/null 2>&1 || {
+      printf 'fm-plan-usage-manual: python3 is required\n' >&2
+      exit 1
+    }
+    ;;
+esac
 case $1 in
   --help|-h)
     usage
