@@ -2120,7 +2120,45 @@ def manual_plan_import(config: Path) -> None:
     projected = project_manual_claude(raw)
     if projected.get("status") != "manual" or projected.get("reason") != "manual_snapshot":
         raise ValueError("invalid input")
-    atomic_json(target, root, raw, 16 * 1024)
+    data = (json.dumps(raw, separators=(",", ":"), sort_keys=True) + "\n").encode("utf-8")
+    if len(data) > 16 * 1024:
+        raise ValueError("too large")
+    import secrets
+    tmp = root / f".plan-usage-manual.{secrets.token_hex(16)}.tmp"
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    fd = os.open(tmp, flags, 0o600)
+    try:
+        opened = os.fstat(fd)
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or opened.st_uid != os.geteuid()
+            or opened.st_nlink != 1
+        ):
+            raise ValueError("unsafe staging")
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "wb", closefd=True) as stream:
+            fd = -1
+            stream.write(data)
+            stream.flush()
+            os.fsync(stream.fileno())
+        staged = tmp.lstat()
+        if (
+            not stat.S_ISREG(staged.st_mode)
+            or staged.st_uid != os.geteuid()
+            or staged.st_nlink != 1
+            or (staged.st_dev, staged.st_ino) != (opened.st_dev, opened.st_ino)
+        ):
+            raise ValueError("unsafe staging")
+        os.replace(tmp, target)
+    finally:
+        if fd >= 0:
+            os.close(fd)
+        try:
+            tmp.unlink()
+        except FileNotFoundError:
+            pass
 
 
 def manual_plan_clear(config: Path) -> None:
@@ -2130,15 +2168,28 @@ def manual_plan_clear(config: Path) -> None:
         return
     if target.parent.resolve(strict=True) != root or not contained(root, target):
         raise ValueError("outside root")
-    before = target.lstat()
-    if stat.S_ISLNK(before.st_mode) or not stat.S_ISREG(before.st_mode):
-        raise ValueError("unsafe type")
-    if before.st_uid != os.geteuid() or target.resolve(strict=True).parent != root:
-        raise ValueError("unsafe owner or containment")
-    current = target.lstat()
-    if (current.st_dev, current.st_ino) != (before.st_dev, before.st_ino):
-        raise ValueError("unsafe target")
-    target.unlink()
+    import secrets
+    quarantine = root / f".plan-usage-manual.clear.{secrets.token_hex(16)}"
+    os.rename(target, quarantine)
+    try:
+        captured = quarantine.lstat()
+        if (
+            stat.S_ISLNK(captured.st_mode)
+            or not stat.S_ISREG(captured.st_mode)
+            or captured.st_uid != os.geteuid()
+            or quarantine.parent.resolve(strict=True) != root
+            or not contained(root, quarantine)
+            or quarantine.resolve(strict=True).parent != root
+        ):
+            raise ValueError("unsafe clear target")
+        quarantine.unlink()
+    except BaseException:
+        try:
+            os.link(quarantine, target, follow_symlinks=False)
+            quarantine.unlink()
+        except (FileExistsError, FileNotFoundError, OSError):
+            pass
+        raise
 
 
 def snapshot_plan(root: Path, manual_enabled: bool, config: Path) -> dict[str, Any]:
