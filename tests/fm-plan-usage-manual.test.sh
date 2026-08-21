@@ -195,13 +195,11 @@ primary
 }
 
 test_permissions_symlink_containment_and_atomic_failure() {
-  local root file external before staging_alias
+  local root file external staging_alias
   root="$TMP_ROOT/security"
   mkdir -p "$root/config"
   run_set "$root/config" >/dev/null 2>&1 || fail "security prior fixture failed"
   file="$root/config/plan-usage-manual.json"
-  before=$(shasum -a 256 "$file")
-
   chmod 644 "$file"
   run_set "$root/config" >/dev/null 2>&1 && fail "unsafe existing permissions were accepted"
   [ "$(file_mode "$file")" = 644 ] || fail "permission refusal changed the target"
