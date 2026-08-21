@@ -3,7 +3,6 @@
 #
 # Usage:
 #   fm-plan-usage-manual.sh set
-#   fm-plan-usage-manual.sh clear
 #   fm-plan-usage-manual.sh --help
 #
 # `set` reads only the fixed Claude plan enum, canonical UTC observation and
@@ -14,17 +13,15 @@
 # The reset time must be on an exact second even though canonical input includes
 # `.000Z`, because fm-plan-usage-manual.v1 stores documented Unix reset seconds.
 # All input is validated through the projection's existing schema boundary
-# before an owner-only atomic replacement of the fixed effective-home
-# config/plan-usage-manual.json. Existing symlinks, unsafe files, and unsafe
-# config roots are refused. Each invalid field or conflicting window identity
+# before an owner-only exclusive creation of the fixed effective-home
+# config/plan-usage-manual.json. Every existing target and unsafe config root
+# is refused. Each invalid field or conflicting window identity
 # receives at most three generic retries without reflecting the rejected value.
-# A failed input, validation, or write keeps the prior valid snapshot intact.
-# `clear` removes only a contained current-user-owned direct regular snapshot,
-# including one whose mode is loose or whose size exceeds the reader limit.
+# A failed input, validation, or write leaves every existing target intact.
 # FM_HOME selects the effective home; FM_CONFIG_OVERRIDE is test-only.
 # Manual projection remains disabled unless the dashboard service was started
 # with FM_PLAN_USAGE_MANUAL=1. An already opted-in dashboard reads a successful
-# set or clear on its next refresh; Herdr and shared daemons need no restart.
+# creation or operator removal on its next refresh; shared daemons need no restart.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -34,11 +31,10 @@ CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 
 usage() {
   cat <<'EOF'
-usage: fm-plan-usage-manual.sh set|clear
+usage: fm-plan-usage-manual.sh set
 
 set    Prompt for bounded scalar values and atomically save the fixed Claude
        fm-plan-usage-manual.v1 snapshot under the effective home's config/.
-clear  Safely remove only that fixed manual snapshot.
 
 Transcribe the numeric values and UTC times shown by Claude's interactive
 /usage screen. Do not paste the screen, terminal output, prose, logs, account
@@ -48,14 +44,16 @@ An invalid field or conflicting window identity receives at most three retries;
 the rejected value is never printed by this command.
 
 The manual source is disabled by default. Start the dashboard service with
-FM_PLAN_USAGE_MANUAL=1 to opt in. Once opted in, set and clear take effect on
-the dashboard's next refresh without restarting Herdr or any shared daemon.
+FM_PLAN_USAGE_MANUAL=1 to opt in. Once opted in, creation and explicit operator
+removal take effect on the next refresh without restarting Herdr or any shared daemon.
+To replace or remove a snapshot, inspect and remove only the fixed
+config/plan-usage-manual.json file before running set again.
 EOF
 }
 
 [ "$#" -eq 1 ] || { usage >&2; exit 2; }
 case $1 in
-  set|clear)
+  set)
     command -v python3 >/dev/null 2>&1 || {
       printf 'fm-plan-usage-manual: python3 is required\n' >&2
       exit 1
@@ -72,13 +70,6 @@ case $1 in
       exit 1
     fi
     printf 'Saved Manual Claude plan snapshot. An opted-in dashboard will display it on its next refresh; no Herdr or shared-daemon restart is needed. If it is not opted in, set FM_PLAN_USAGE_MANUAL=1 before the dashboard service next starts.\n'
-    ;;
-  clear)
-    if ! python3 "$SCRIPT_DIR/telemetry/fm-telemetry.py" plan-manual-clear "$CONFIG"; then
-      printf 'fm-plan-usage-manual: refused unsafe clear target; snapshot not removed\n' >&2
-      exit 1
-    fi
-    printf 'Cleared Manual Claude plan snapshot. An opted-in dashboard will update on its next refresh; no Herdr or shared-daemon restart is needed.\n'
     ;;
   *)
     usage >&2
