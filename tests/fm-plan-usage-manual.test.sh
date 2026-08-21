@@ -282,7 +282,7 @@ PY
 }
 
 test_bounded_non_echoing_retries() {
-  local root file before out retry_input exhausted conflict_input conflict_exhausted
+  local root file out retry_input exhausted conflict_input conflict_exhausted
   root="$TMP_ROOT/retries"
   mkdir -p "$root/config"
   retry_input='PRIVATE_BAD_PLAN_ONE
