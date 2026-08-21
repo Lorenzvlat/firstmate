@@ -55,48 +55,28 @@ test_help_owns_guided_boundary() {
   local out
   out=$($IMPORTER --help) || fail "manual importer help failed"
   assert_contains "$out" 'fm-plan-usage-manual.sh set' "help omitted creation action"
-  assert_contains "$out" 'clear' "help omitted safe clear action"
+  assert_contains "$out" 'no clear' "help omitted clear-action refusal"
+  assert_contains "$out" 'explicitly remove' "help omitted manual removal instruction"
   assert_contains "$out" 'Do not paste the screen' "help omitted pasted-output refusal"
   assert_contains "$out" 'FM_PLAN_USAGE_MANUAL=1' "help omitted disabled-by-default opt-in"
   assert_contains "$out" 'without restarting Herdr or any shared daemon' "help omitted immediate refresh behavior"
   pass "manual importer help owns its bounded input and service opt-in mechanics"
 }
 
-test_clear_accepts_only_safe_direct_snapshot() {
-  local root file external out
-  root="$TMP_ROOT/clear"
+test_clear_is_unsupported_and_preserves_target() {
+  local root file before out
+  root="$TMP_ROOT/unsupported-clear"
   mkdir -p "$root/config"
   file="$root/config/plan-usage-manual.json"
-
-  printf 'oversized-but-removable' > "$file"
-  chmod 666 "$file"
+  printf 'operator-owned snapshot\n' > "$file"
+  before=$(cat "$file")
   out=$(FM_CONFIG_OVERRIDE="$root/config" "$IMPORTER" clear 2>&1) \
-    || fail "clear refused a loose direct regular snapshot: $out"
-  [ ! -e "$file" ] || fail "clear left the direct regular snapshot present"
-
-  external="$root/external"
-  printf 'external\n' > "$external"
-  ln -s "$external" "$file"
-  FM_CONFIG_OVERRIDE="$root/config" "$IMPORTER" clear >/dev/null 2>&1 \
-    && fail "clear accepted a snapshot symlink"
-  [ -L "$file" ] || fail "clear removed the refused snapshot symlink"
-  [ "$(cat "$external")" = external ] || fail "clear changed the symlink target"
-
-  rm -f "$file"
-  mkdir "$file"
-  FM_CONFIG_OVERRIDE="$root/config" "$IMPORTER" clear >/dev/null 2>&1 \
-    && fail "clear accepted a non-regular snapshot"
-  [ -d "$file" ] || fail "clear removed the refused non-regular snapshot"
-
-  rm -rf "$file" "$root/config"
-  mkdir "$root/real-config"
-  ln -s "$root/real-config" "$root/config"
-  printf 'snapshot\n' > "$root/real-config/plan-usage-manual.json"
-  FM_CONFIG_OVERRIDE="$root/config" "$IMPORTER" clear >/dev/null 2>&1 \
-    && fail "clear accepted a symlinked config root"
-  [ -f "$root/real-config/plan-usage-manual.json" ] \
-    || fail "clear removed a snapshot through a containment hazard"
-  pass "clear removes only a contained current-user-owned direct regular snapshot"
+    && fail "clear action remained supported"
+  assert_contains "$out" 'usage: fm-plan-usage-manual.sh set' "unsupported clear omitted creation-only usage"
+  [ "$(cat "$file")" = "$before" ] || fail "unsupported clear changed the existing target"
+  [ "$(find "$root/config" -mindepth 1 -maxdepth 1 | wc -l | tr -d ' ')" = 1 ] \
+    || fail "unsupported clear created quarantine, restore, or staging artifacts"
+  pass "clear is unsupported and creates no removal or recovery path"
 }
 
 test_success_permissions_and_manual_projection() {
@@ -376,7 +356,7 @@ test_missing_python_has_distinct_diagnostic() {
 }
 
 test_help_owns_guided_boundary
-test_clear_accepts_only_safe_direct_snapshot
+test_clear_is_unsupported_and_preserves_target
 test_success_permissions_and_manual_projection
 test_hostile_malformed_range_and_expiry_leave_absent
 test_permissions_symlink_containment_and_atomic_failure

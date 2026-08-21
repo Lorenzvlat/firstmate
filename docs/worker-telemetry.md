@@ -302,7 +302,8 @@ A service may opt into an owner-maintained manual Claude snapshot only by settin
 The default and every other value keep the manual source disabled.
 The fixed source is `config/plan-usage-manual.json` under the effective Firstmate home or its test-only `FM_CONFIG_OVERRIDE`.
 The only supported mutation command is the local guided `bin/fm-plan-usage-manual.sh` helper, whose header and `--help` own its exact mechanics.
-Its `set` action creates the fixed snapshot exclusively, and its `clear` action safely removes it before a replacement is created.
+Its only action creates the fixed snapshot exclusively.
+The helper has no clear, overwrite, quarantine, restore, or replacement path; the operator explicitly removes the local snapshot before another import.
 There is no browser read/write route, arbitrary mutation input, credential access, terminal automation, or UI automation for this file.
 
 The private input schema is:
@@ -326,7 +327,6 @@ The private input schema is:
 ```
 
 The file must be a direct regular-file child of the real config directory, must not be a symlink, must be owned by the current user, must grant no group or other permissions, and must be at most 16 KiB.
-The `clear` action may remove only a contained, current-user-owned direct regular snapshot and refuses a symlink, non-regular file, wrong owner, or containment failure; it may remove that safe target even when its mode is loose or its size exceeds the read limit.
 Its object and every window use exact keys.
 It accepts at most twelve numeric windows, only the fixed `primary` and `secondary` slots, the fixed Claude plan enum, safe integer percentages and durations, canonical observed/expiry timestamps, and documented Unix reset seconds.
 The output derives keys, labels, seconds, remaining percentage, and reset timestamps exactly as it does for official windows.
