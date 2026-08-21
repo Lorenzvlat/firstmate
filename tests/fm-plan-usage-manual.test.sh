@@ -220,6 +220,8 @@ import sys
 spec = importlib.util.spec_from_file_location("fm_telemetry", sys.argv[1])
 module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
+os.environ["FM_TELEMETRY_TEST_MODE"] = "1"
+os.environ["FM_TELEMETRY_TEST_NOW"] = "1785542400"
 config = Path(sys.argv[2])
 target = config / "plan-usage-manual.json"
 external = Path(sys.argv[3])
@@ -242,6 +244,58 @@ assert target.is_symlink()
 PY
   [ "$(cat "$external")" = external ] || fail "clear rename race changed the external target"
   pass "clear validates the atomically captured directory entry before unlinking"
+}
+
+test_import_preserves_replacement_races() {
+  local root external
+  root="$TMP_ROOT/import-race"
+  mkdir -p "$root/config"
+  run_set "$root/config" >/dev/null 2>&1 || fail "import race fixture failed"
+  external="$root/external"
+  printf 'external\n' > "$external"
+  python3 - "$ROOT/bin/telemetry/fm-telemetry.py" "$root/config" "$external" <<'PY' \
+    || fail "import target race did not fail closed"
+import importlib.util
+import io
+import os
+from pathlib import Path
+from unittest import mock
+import sys
+
+spec = importlib.util.spec_from_file_location("fm_telemetry", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+os.environ["FM_TELEMETRY_TEST_MODE"] = "1"
+os.environ["FM_TELEMETRY_TEST_NOW"] = "1785542400"
+config = Path(sys.argv[2])
+target = config / "plan-usage-manual.json"
+external = Path(sys.argv[3])
+prior = config / "prior"
+real_private_dir = module.manual_private_dir
+
+def replace_before_capture(root):
+    target.rename(prior)
+    target.symlink_to(external)
+    return real_private_dir(root)
+
+values = "\n".join([
+    "pro", "2026-08-01T00:00:00.000Z", "2026-08-01T01:00:00.000Z", "1",
+    "primary", "40", "300", "2026-08-01T00:30:00.000Z", "",
+])
+with mock.patch.object(module, "manual_private_dir", replace_before_capture), \
+     mock.patch.object(module.sys, "stdin", io.StringIO(values)):
+    try:
+        module.manual_plan_import(config)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("replacement target was overwritten")
+assert target.is_symlink()
+assert external.read_text() == "external\n"
+assert prior.is_file()
+PY
+  [ "$(cat "$external")" = external ] || fail "import target race changed the concurrent replacement"
+  pass "import publication preserves a target replaced during prompting"
 }
 
 test_clear_only_fixed_snapshot() {
@@ -383,5 +437,6 @@ test_hostile_malformed_range_and_expiry_keep_prior
 test_permissions_symlink_containment_and_atomic_failure
 test_clear_only_fixed_snapshot
 test_clear_captures_rename_race
+test_import_preserves_replacement_races
 test_bounded_non_echoing_retries
 test_missing_python_has_distinct_diagnostic

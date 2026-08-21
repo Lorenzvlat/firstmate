@@ -2058,11 +2058,53 @@ def prompt_iso(
     return prompt_value(label, parse)
 
 
+def manual_private_dir(root: Path) -> Path:
+    import secrets
+    for _ in range(128):
+        path = root / f".plan-usage-manual.{secrets.token_hex(16)}"
+        try:
+            path.mkdir(mode=0o700)
+        except FileExistsError:
+            continue
+        info = path.lstat()
+        if (
+            not stat.S_ISDIR(info.st_mode)
+            or info.st_uid != os.geteuid()
+            or info.st_mode & 0o077
+            or path.parent.resolve(strict=True) != root
+        ):
+            raise ValueError("unsafe transaction directory")
+        return path
+    raise ValueError("could not create transaction directory")
+
+
+def rename_noreplace(source: Path, target: Path) -> None:
+    import ctypes
+    import errno
+    library = ctypes.CDLL(None, use_errno=True)
+    source_bytes = os.fsencode(source)
+    target_bytes = os.fsencode(target)
+    if sys.platform == "darwin":
+        result = library.renamex_np(source_bytes, target_bytes, 0x00000004)
+    elif hasattr(library, "renameat2"):
+        result = library.renameat2(-2, source_bytes, -2, target_bytes, 1)
+    else:
+        raise OSError(errno.ENOTSUP, "exclusive rename unavailable")
+    if result != 0:
+        error = ctypes.get_errno()
+        raise OSError(error, os.strerror(error), target)
+
+
+def restore_manual_entry(captured: Path, target: Path) -> None:
+    rename_noreplace(captured, target)
+
+
 def manual_plan_import(config: Path) -> None:
     root = state_root(str(config))
     target = root / "plan-usage-manual.json"
+    observed = None
     if target.exists() or target.is_symlink():
-        secure_regular(target, root, 16 * 1024, owner_only=True)
+        observed = secure_regular(target, root, 16 * 1024, owner_only=True)
     print("Enter values transcribed from Claude's interactive usage screen. Text, pasted UI output, and JSON are not accepted.", file=sys.stderr)
     plan = prompt_enum(
         "Claude plan (free|pro|max|team|business|enterprise|edu|unknown): ", CLAUDE_PLAN_ENUM
@@ -2151,7 +2193,43 @@ def manual_plan_import(config: Path) -> None:
             or (staged.st_dev, staged.st_ino) != (opened.st_dev, opened.st_ino)
         ):
             raise ValueError("unsafe staging")
-        os.replace(tmp, target)
+        transaction = manual_private_dir(root)
+        captured = transaction / target.name
+        try:
+            if target.exists() or target.is_symlink():
+                os.rename(target, captured)
+                current = captured.lstat()
+            else:
+                current = None
+            if observed is None:
+                if current is not None:
+                    restore_manual_entry(captured, target)
+                    raise ValueError("target appeared during import")
+            elif (
+                current is None
+                or not stat.S_ISREG(current.st_mode)
+                or current.st_uid != os.geteuid()
+                or current.st_mode & 0o077
+                or current.st_size < 0
+                or current.st_size > 16 * 1024
+                or (current.st_dev, current.st_ino) != (observed.st_dev, observed.st_ino)
+            ):
+                if current is not None:
+                    restore_manual_entry(captured, target)
+                raise ValueError("target changed during import")
+            try:
+                rename_noreplace(tmp, target)
+            except BaseException:
+                if current is not None:
+                    restore_manual_entry(captured, target)
+                raise
+            if current is not None:
+                captured.unlink()
+        finally:
+            try:
+                transaction.rmdir()
+            except OSError:
+                pass
     finally:
         if fd >= 0:
             os.close(fd)
@@ -2168,28 +2246,31 @@ def manual_plan_clear(config: Path) -> None:
         return
     if target.parent.resolve(strict=True) != root or not contained(root, target):
         raise ValueError("outside root")
-    import secrets
-    quarantine = root / f".plan-usage-manual.clear.{secrets.token_hex(16)}"
-    os.rename(target, quarantine)
+    transaction = manual_private_dir(root)
+    captured_path = transaction / target.name
+    os.rename(target, captured_path)
     try:
-        captured = quarantine.lstat()
+        captured = captured_path.lstat()
         if (
             stat.S_ISLNK(captured.st_mode)
             or not stat.S_ISREG(captured.st_mode)
             or captured.st_uid != os.geteuid()
-            or quarantine.parent.resolve(strict=True) != root
-            or not contained(root, quarantine)
-            or quarantine.resolve(strict=True).parent != root
+            or captured_path.parent.resolve(strict=True) != transaction
+            or not contained(root, captured_path)
+            or captured_path.resolve(strict=True).parent != transaction
         ):
             raise ValueError("unsafe clear target")
-        quarantine.unlink()
+        captured_path.unlink()
     except BaseException:
         try:
-            os.link(quarantine, target, follow_symlinks=False)
-            quarantine.unlink()
-        except (FileExistsError, FileNotFoundError, OSError):
-            pass
+            restore_manual_entry(captured_path, target)
+        finally:
+            try:
+                transaction.rmdir()
+            except OSError:
+                pass
         raise
+    transaction.rmdir()
 
 
 def snapshot_plan(root: Path, manual_enabled: bool, config: Path) -> dict[str, Any]:
