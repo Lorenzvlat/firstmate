@@ -287,7 +287,6 @@ def atomic_bytes(path: Path, data: bytes, max_bytes: int) -> None:
             stream.flush()
             os.fsync(stream.fileno())
         os.replace(tmp, path)
-        os.chmod(path, 0o600)
     finally:
         try:
             tmp.unlink()
@@ -1913,16 +1912,8 @@ def unavailable_codex(reason: str) -> dict[str, Any]:
     }
 
 
-def manual_claude_plan(config: Path, enabled: bool) -> dict[str, Any]:
-    if not enabled:
-        return claude_plan()
-    try:
-        root = state_root(str(config))
-        raw = read_secure_json(root / "plan-usage-manual.json", root, 16 * 1024, owner_only=True)
-    except (OSError, ValueError, json.JSONDecodeError, UnicodeError):
-        record = claude_plan()
-        record["reason"] = "source_error"
-        return record
+def project_manual_claude(raw: Any) -> dict[str, Any]:
+    """Validate and project the single fm-plan-usage-manual.v1 contract."""
     expected = {"schema", "provider", "plan", "observedAt", "expiresAt", "windows"}
     if not isinstance(raw, dict) or set(raw) != expected:
         record = claude_plan()
@@ -1992,6 +1983,210 @@ def manual_claude_plan(config: Path, enabled: bool) -> dict[str, Any]:
         record["reason"] = "expired"
         return record
     return result
+
+
+def manual_claude_plan(config: Path, enabled: bool) -> dict[str, Any]:
+    if not enabled:
+        return claude_plan()
+    try:
+        root = state_root(str(config))
+        raw = read_secure_json(root / "plan-usage-manual.json", root, 16 * 1024, owner_only=True)
+    except (OSError, ValueError, json.JSONDecodeError, UnicodeError):
+        record = claude_plan()
+        record["reason"] = "source_error"
+        return record
+    return project_manual_claude(raw)
+
+
+PROMPT_RETRIES = 3
+
+
+def prompt_line(label: str, max_length: int = 64) -> str:
+    sys.stderr.write(label)
+    sys.stderr.flush()
+    value = sys.stdin.readline(max_length + 2)
+    if not value or not value.endswith("\n") or len(value.rstrip("\n")) > max_length:
+        raise ValueError("invalid input")
+    return value.rstrip("\n")
+
+
+def prompt_value(label: str, parser: Any) -> Any:
+    for attempt in range(PROMPT_RETRIES + 1):
+        try:
+            parsed = parser(prompt_line(label))
+        except ValueError:
+            parsed = None
+        if parsed is not None:
+            return parsed
+        if attempt < PROMPT_RETRIES:
+            print("Invalid value; try again.", file=sys.stderr)
+    raise ValueError("invalid input")
+
+
+def prompt_enum(label: str, allowed: set[str]) -> str:
+    return prompt_value(label, lambda value: value if value in allowed else None)
+
+
+def prompt_integer(label: str, minimum: int, maximum: int) -> int:
+    def parse(value: str) -> int | None:
+        if not re.fullmatch(r"0|[1-9][0-9]*", value, re.ASCII):
+            return None
+        parsed = int(value)
+        return parsed if minimum <= parsed <= maximum else None
+
+    return prompt_value(label, parse)
+
+
+def prompt_iso(
+    label: str,
+    *,
+    future_slack: int | None = 300,
+    after: float | None = None,
+    require_future: bool = False,
+    whole_second: bool = False,
+) -> str:
+    def parse(value: str) -> str | None:
+        epoch = parse_iso(value, future_slack=future_slack)
+        if epoch is None or (after is not None and epoch <= after):
+            return None
+        if require_future and epoch <= now_epoch():
+            return None
+        if whole_second and not epoch.is_integer():
+            return None
+        return value
+
+    return prompt_value(label, parse)
+
+
+def rename_noreplace(source: Path, target: Path) -> None:
+    import ctypes
+    import errno
+    library = ctypes.CDLL(None, use_errno=True)
+    source_bytes = os.fsencode(source)
+    target_bytes = os.fsencode(target)
+    if sys.platform == "darwin":
+        result = library.renamex_np(source_bytes, target_bytes, 0x00000004)
+    elif hasattr(library, "renameat2"):
+        result = library.renameat2(-2, source_bytes, -2, target_bytes, 1)
+    else:
+        raise OSError(errno.ENOTSUP, "exclusive rename unavailable")
+    if result != 0:
+        error = ctypes.get_errno()
+        raise OSError(error, os.strerror(error), target)
+
+
+def manual_plan_import(config: Path) -> None:
+    root = state_root(str(config))
+    target = root / "plan-usage-manual.json"
+    if target.exists() or target.is_symlink():
+        raise ValueError("snapshot already exists")
+    print("Enter values transcribed from Claude's interactive usage screen. Text, pasted UI output, and JSON are not accepted.", file=sys.stderr)
+    plan = prompt_enum(
+        "Claude plan (free|pro|max|team|business|enterprise|edu|unknown): ", CLAUDE_PLAN_ENUM
+    )
+    observed_at = prompt_iso("Observed at (UTC YYYY-MM-DDTHH:MM:SS.mmmZ): ")
+    observed_epoch = parse_iso(observed_at)
+    if observed_epoch is None:
+        raise ValueError("invalid input")
+    expires_at = prompt_iso(
+        "Expires at (UTC YYYY-MM-DDTHH:MM:SS.mmmZ): ",
+        future_slack=None,
+        after=observed_epoch,
+        require_future=True,
+    )
+    count = prompt_integer("Number of usage windows (1-12): ", 1, 12)
+    windows = []
+    identities: set[tuple[str, int]] = set()
+    for ordinal in range(1, count + 1):
+        print(f"Window {ordinal}:", file=sys.stderr)
+        for identity_attempt in range(PROMPT_RETRIES + 1):
+            slot = prompt_enum("  Slot (primary|secondary): ", {"primary", "secondary"})
+            used = prompt_integer("  Used percent (0-100): ", 0, 100)
+            duration = prompt_integer("  Window duration in minutes: ", 1, MAX_SAFE_INTEGER // 60)
+            reset_iso = prompt_iso(
+                "  Resets at (UTC YYYY-MM-DDTHH:MM:SS.mmmZ): ",
+                future_slack=None,
+                require_future=True,
+                whole_second=True,
+            )
+            identity = (slot, duration)
+            if identity not in identities:
+                identities.add(identity)
+                break
+            if identity_attempt < PROMPT_RETRIES:
+                print("Window identity conflicts; enter the window again.", file=sys.stderr)
+        else:
+            raise ValueError("invalid input")
+        reset_epoch = parse_iso(reset_iso, future_slack=None)
+        if reset_epoch is None:
+            raise ValueError("invalid input")
+        windows.append({
+            "slot": slot,
+            "usedPercent": used,
+            "windowDurationMins": duration,
+            "resetsAt": int(reset_epoch),
+        })
+    raw = {
+        "schema": "fm-plan-usage-manual.v1",
+        "provider": "claude",
+        "plan": plan,
+        "observedAt": observed_at,
+        "expiresAt": expires_at,
+        "windows": windows,
+    }
+    projected = project_manual_claude(raw)
+    if projected.get("status") != "manual" or projected.get("reason") != "manual_snapshot":
+        raise ValueError("invalid input")
+    data = (json.dumps(raw, separators=(",", ":"), sort_keys=True) + "\n").encode("utf-8")
+    if len(data) > 16 * 1024:
+        raise ValueError("too large")
+    import secrets
+    tmp = root / f".plan-usage-manual.{secrets.token_hex(16)}.tmp"
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    fd = os.open(tmp, flags, 0o600)
+    published = False
+    opened = None
+    try:
+        opened = os.fstat(fd)
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or opened.st_uid != os.geteuid()
+            or opened.st_nlink != 1
+        ):
+            raise ValueError("unsafe staging")
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "wb", closefd=True) as stream:
+            fd = -1
+            stream.write(data)
+            stream.flush()
+            os.fsync(stream.fileno())
+        staged = tmp.lstat()
+        if (
+            not stat.S_ISREG(staged.st_mode)
+            or staged.st_uid != os.geteuid()
+            or staged.st_nlink != 1
+            or (staged.st_dev, staged.st_ino) != (opened.st_dev, opened.st_ino)
+        ):
+            raise ValueError("unsafe staging")
+        rename_noreplace(tmp, target)
+        published = True
+    finally:
+        if fd >= 0:
+            os.close(fd)
+        if not published:
+            try:
+                staged = tmp.lstat()
+                if opened is not None and (
+                    stat.S_ISREG(staged.st_mode)
+                    and staged.st_uid == os.geteuid()
+                    and staged.st_nlink == 1
+                    and (staged.st_dev, staged.st_ino) == (opened.st_dev, opened.st_ino)
+                ):
+                    tmp.unlink()
+            except FileNotFoundError:
+                pass
 
 
 def snapshot_plan(root: Path, manual_enabled: bool, config: Path) -> dict[str, Any]:
@@ -2089,6 +2284,9 @@ def main(argv: list[str]) -> int:
             if argv[2] not in {"0", "1"}:
                 return 2
             print(json.dumps(snapshot_plan(state_root(argv[1]), enabled, Path(argv[3])), separators=(",", ":")))
+            return 0
+        if action == "plan-manual-import" and len(argv) == 2:
+            manual_plan_import(Path(argv[1]))
             return 0
     except (OSError, ValueError, json.JSONDecodeError, UnicodeError):
         return 1
