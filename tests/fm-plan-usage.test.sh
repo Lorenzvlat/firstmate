@@ -273,7 +273,7 @@ test_claude_statusline_shape_ranges_and_window_independence() {
   [ ! -e "$state/.claude-plan-usage-cache.json" ] \
     || fail "one malformed present window allowed the other window"
 
-  for percentage in true '"40"' NaN Infinity -0.1 100.1; do
+  for percentage in true '"40"' NaN Infinity -0.1 100.1 0.30000000000000004; do
     payload=$(printf '{"version":"2.1.221","rate_limits":{"five_hour":{"used_percentage":%s,"resets_at":1785559400}}}' "$percentage")
     send_claude_status "$state" claude-shape-x1 "$generation" 1785542400 "$payload"
     [ ! -e "$state/.claude-plan-usage-cache.json" ] \
@@ -308,7 +308,7 @@ PY
   send_claude_status "$state" nonclaude-shape-x2 "$generation" 1785542400 \
     '{"version":"2.1.221","rate_limits":{"five_hour":{"used_percentage":10,"resets_at":1785559400}}}'
   [ ! -e "$state/.claude-plan-usage-cache.json" ] || fail "non-Claude harness created a cache"
-  pass "Claude plan admission rejects malformed, non-finite, out-of-range, unsafe, oversized, and foreign observations"
+  pass "Claude plan admission rejects malformed, non-finite, out-of-range, unprojectable, unsafe, oversized, and foreign observations"
 }
 
 test_claude_cache_security_races_and_passive_failure() {
@@ -343,6 +343,39 @@ test_claude_cache_security_races_and_passive_failure() {
   chmod 600 "$state/.claude-plan-usage-cache.json"
   out=$(run_snapshot "$root" 1785542400) || fail "malformed Claude cache snapshot failed"
   json_assert "$out" 'value["providers"][1]["reason"] == "source_error" and value["providers"][1]["windows"] == []'
+  send_claude_status "$state" claude-safe-x1 "$generation" 1785542400 "$payload"
+  cache=$(<"$state/.claude-plan-usage-cache.json")
+  assert_not_contains "$cache" PRIVATE_WRONG_MODE "malformed owner-only cache was not replaced"
+  json_assert "$cache" 'value["observedAt"] == "2026-08-01T00:00:00.000Z" and value["windows"] == [{"resetsAt":1785559400,"usedPercent":25.5,"window":"five_hour"}]'
+
+  send_claude_status "$state" claude-safe-x1 "$generation" 1785542430 "$payload"
+  cache=$(<"$state/.claude-plan-usage-cache.json")
+  json_assert "$cache" 'value["observedAt"] == "2026-08-01T00:00:00.000Z"'
+  send_claude_status "$state" claude-safe-x1 "$generation" 1785542470 "$payload"
+  cache=$(<"$state/.claude-plan-usage-cache.json")
+  json_assert "$cache" 'value["observedAt"] == "2026-08-01T00:01:10.000Z"'
+  send_claude_status "$state" claude-safe-x1 "$generation" 1785542475 \
+    '{"version":"2.1.221","rate_limits":{"five_hour":{"used_percentage":26.5,"resets_at":1785559400}}}'
+  cache=$(<"$state/.claude-plan-usage-cache.json")
+  json_assert "$cache" 'value["observedAt"] == "2026-08-01T00:01:15.000Z" and value["windows"][0]["usedPercent"] == 26.5'
+  out=$(run_snapshot "$root" 1785542475) || fail "refreshed Claude cache snapshot failed"
+  json_assert "$out" 'value["providers"][1]["status"] == "fresh" and value["providers"][1]["windows"][0]["usedPercent"] == 26.5'
+
+  python3 - "$state/.claude-plan-usage-cache.json" <<'PY'
+from pathlib import Path
+import json, sys
+path = Path(sys.argv[1])
+record = json.loads(path.read_text())
+record["observedAt"] = "2126-08-01T00:00:00.000Z"
+path.write_text(json.dumps(record))
+path.chmod(0o600)
+PY
+  out=$(run_snapshot "$root" 1785542475) || fail "future-observation Claude cache snapshot failed"
+  json_assert "$out" 'value["providers"][1]["reason"] == "source_error" and value["providers"][1]["windows"] == []'
+  send_claude_status "$state" claude-safe-x1 "$generation" 1785542480 "$payload"
+  cache=$(<"$state/.claude-plan-usage-cache.json")
+  json_assert "$cache" 'value["observedAt"] == "2026-08-01T00:01:20.000Z" and value["windows"][0]["usedPercent"] == 25.5'
+
   python3 - "$state/.claude-plan-usage-cache.json" <<'PY'
 from pathlib import Path
 import sys
@@ -411,7 +444,7 @@ print(json.dumps(module.cached_claude_plan(root)[1]))
 PY
 ) || fail "wrong-owner cache probe failed"
   [ "$owner_probe" = '"source_error"' ] || fail "wrong-owner cache was not refused"
-  pass "Claude plan cache is owner-only, no-follow, atomic under races, and passive on write failure"
+  pass "Claude plan cache is owner-only, no-follow, atomic under races, self-healing, and passive on write failure"
 }
 
 test_claude_freshness_independent_expiry_and_manual_fallback() {

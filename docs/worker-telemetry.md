@@ -136,7 +136,7 @@ The single kill path for a misbehaving collector is `bin/fm-claude-telemetry.sh 
 The launch also writes a `statusLine` command into that worker's task-local `.claude/settings.local.json`.
 It is scoped to the worker worktree, is git-excluded, and is removed with the worktree, but it does override any global status line the captain configured for the duration of that task.
 Its effects are the bounded model projection described below and the home-level plan projection owned by [Claude subscription-plan source](#claude-subscription-plan-source).
-The status-line render loads no collector, subprocess, or nonce module, so it stays a cheap per-render call.
+The status-line render loads no collector, subprocess, or nonce module, and it rewrites neither projection when nothing changed, so it stays a cheap per-render call.
 
 Claude telemetry is enabled for a newly launched non-secondmate worker only when the built-in privacy self-test passes and a task-scoped loopback collector starts successfully.
 Otherwise Claude launches normally and worker telemetry remains unavailable.
@@ -307,10 +307,12 @@ The complete plan allowlist is:
 Either named window may be absent independently.
 A present window must contain both values.
 The percentage must be a finite JSON number from zero through 100 and must round-trip through the public JSON number representation without changing its decimal value.
+Its published remaining complement must round-trip on the same rule, so a percentage that could not be projected later is refused at admission instead of being cached.
 The reset must be a safe integer Unix epoch strictly after observation and no later than the named window duration plus five minutes after observation.
 A present malformed window rejects the complete observation, while an already expired window is omitted and another valid window may still refresh the cache.
 At least one valid unexpired window is required for a write.
 Unknown status-line fields are ignored and never persisted.
+The identical admission rule is applied by the writer, the cache validator, and the public projection, so no value can pass one gate and fail the next.
 
 The private cache schema is:
 
@@ -333,6 +335,8 @@ The private cache schema is:
 The cache is the direct state child `state/.claude-plan-usage-cache.json`, is owned by the current user, grants no group or other permissions, is not a symlink, has one link, and is at most 4 KiB.
 Concurrent receivers use the separate owner-only no-follow `state/.claude-plan-usage.lock` without waiting when another writer holds it.
 The fixed same-directory staging file is atomically replaced while that lock is held, and an unsafe existing cache or staging path is refused rather than followed or overwritten.
+Existing cache content that is unreadable or no longer valid is replaced only after every containment, ownership, permission, no-follow, link-count, and size check on that path has passed, so a corrupt or stepped-clock cache recovers on the next observation instead of blocking the source permanently.
+A newer observation whose source version and windows are unchanged rewrites the cache at most once per minute, while any changed window is written immediately; the two-minute fresh and fifteen-minute stale contracts are unaffected because an active worker refreshes well inside both.
 The receiver never holds a task telemetry lock while acquiring the shared plan lock.
 Cache failure is passive and cannot prevent the already-authorized model projection, worker liveness observation, Stop signaling, collector operation, or Claude worker execution.
 Task cleanup deliberately leaves this home-level account cache intact.

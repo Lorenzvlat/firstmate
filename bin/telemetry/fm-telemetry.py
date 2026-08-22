@@ -102,6 +102,7 @@ CLAUDE_PLAN_CACHE_MAX_BYTES = 4 * 1024
 CLAUDE_PLAN_FRESH_SECONDS = 2 * 60
 CLAUDE_PLAN_STALE_SECONDS = 15 * 60
 CLAUDE_PLAN_RESET_SLACK_SECONDS = 5 * 60
+CLAUDE_PLAN_REFRESH_SECONDS = 60
 CLAUDE_PLAN_WINDOWS = {
     "five_hour": {"minutes": 300, "seconds": 18_000, "label": "5-hour"},
     "seven_day": {"minutes": 10_080, "seconds": 604_800, "label": "7-day"},
@@ -730,6 +731,49 @@ def supported_claude_status_version(value: Any) -> str | None:
     return value
 
 
+def normalized_plan_window(
+    name: Any,
+    percent_value: Any,
+    reset_value: Any,
+    observed_epoch: float,
+) -> tuple[str, dict[str, Any] | None]:
+    """Apply the single plan-window admission rule shared by every gate.
+
+    Returns ``("ok", window)`` for a usable window, ``("expired", None)`` when
+    the window already reset at ``observed_epoch``, and ``("invalid", None)``
+    when the observation itself is unusable.
+    """
+    if not isinstance(name, str) or name not in CLAUDE_PLAN_WINDOWS:
+        return "invalid", None
+    percentage = safe_percentage(percent_value)
+    resets_at = safe_int(reset_value, 0, 253_402_300_799)
+    if percentage is None or resets_at is None:
+        return "invalid", None
+    remaining = decimal_json_number(Decimal(100) - percentage[0])
+    if remaining is None:
+        return "invalid", None
+    maximum_reset = observed_epoch + CLAUDE_PLAN_WINDOWS[name]["seconds"]
+    maximum_reset += CLAUDE_PLAN_RESET_SLACK_SECONDS
+    if resets_at > maximum_reset:
+        return "invalid", None
+    if resets_at <= observed_epoch:
+        return "expired", None
+    return "ok", {
+        "window": name,
+        "usedPercent": percentage[1],
+        "remainingPercent": remaining,
+        "resetsAt": resets_at,
+    }
+
+
+def cache_plan_window(normalized: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "window": normalized["window"],
+        "usedPercent": normalized["usedPercent"],
+        "resetsAt": normalized["resetsAt"],
+    }
+
+
 def valid_claude_plan_cache(value: Any) -> dict[str, Any] | None:
     expected = {"schema", "source", "sourceVersion", "observedAt", "windows"}
     if not isinstance(value, dict) or set(value) != expected:
@@ -753,20 +797,15 @@ def valid_claude_plan_cache(value: Any) -> dict[str, Any] | None:
         if not isinstance(window, dict) or set(window) != {"window", "usedPercent", "resetsAt"}:
             return None
         name = window.get("window")
-        if name not in CLAUDE_PLAN_WINDOWS or name in seen:
+        if name in seen:
             return None
-        percentage = safe_percentage(window.get("usedPercent"))
-        resets_at = safe_int(window.get("resetsAt"), 0, 253_402_300_799)
-        if percentage is None or resets_at is None:
-            return None
-        maximum_reset = observed_epoch + CLAUDE_PLAN_WINDOWS[name]["seconds"]
-        maximum_reset += CLAUDE_PLAN_RESET_SLACK_SECONDS
-        if resets_at <= observed_epoch or resets_at > maximum_reset:
-            return None
-        seen.add(name)
-        normalized_windows.append(
-            {"window": name, "usedPercent": percentage[1], "resetsAt": resets_at}
+        status, normalized = normalized_plan_window(
+            name, window.get("usedPercent"), window.get("resetsAt"), observed_epoch
         )
+        if status != "ok" or normalized is None:
+            return None
+        seen.add(normalized["window"])
+        normalized_windows.append(cache_plan_window(normalized))
     normalized_windows.sort(key=lambda item: tuple(CLAUDE_PLAN_WINDOWS).index(item["window"]))
     return {
         "schema": "fm-claude-plan-statusline-cache.v1",
@@ -784,7 +823,7 @@ def project_claude_status_plan(source: dict[str, Any]) -> dict[str, Any] | None:
         return None
     observed_epoch = now_epoch()
     windows: list[dict[str, Any]] = []
-    for name, specification in CLAUDE_PLAN_WINDOWS.items():
+    for name in CLAUDE_PLAN_WINDOWS:
         if name not in rate_limits:
             continue
         source_window = rate_limits.get(name)
@@ -792,15 +831,17 @@ def project_claude_status_plan(source: dict[str, Any]) -> dict[str, Any] | None:
             return None
         if "used_percentage" not in source_window or "resets_at" not in source_window:
             return None
-        percentage = safe_percentage(source_window.get("used_percentage"))
-        resets_at = safe_int(source_window.get("resets_at"), 0, 253_402_300_799)
-        if percentage is None or resets_at is None:
+        status, normalized = normalized_plan_window(
+            name,
+            source_window.get("used_percentage"),
+            source_window.get("resets_at"),
+            observed_epoch,
+        )
+        if status == "invalid":
             return None
-        if resets_at <= observed_epoch:
+        if normalized is None:
             continue
-        if resets_at > observed_epoch + specification["seconds"] + CLAUDE_PLAN_RESET_SLACK_SECONDS:
-            return None
-        windows.append({"window": name, "usedPercent": percentage[1], "resetsAt": resets_at})
+        windows.append(cache_plan_window(normalized))
     if not windows:
         return None
     return {
@@ -879,21 +920,26 @@ def write_claude_plan_cache(root: Path, source: dict[str, Any]) -> None:
             )
         except FileNotFoundError:
             existing_info = None
+        existing = None
         if existing_info is not None:
             if existing_info.st_nlink != 1:
                 return
             try:
-                existing_raw = read_secure_json(
-                    path, root, CLAUDE_PLAN_CACHE_MAX_BYTES, owner_only=True
+                existing = valid_claude_plan_cache(
+                    read_secure_json(path, root, CLAUDE_PLAN_CACHE_MAX_BYTES, owner_only=True)
                 )
             except (OSError, ValueError, json.JSONDecodeError, UnicodeError):
-                return
-            existing = valid_claude_plan_cache(existing_raw)
-            if existing is None:
-                return
+                existing = None
+        if existing is not None:
             old_observed = parse_iso(existing["observedAt"], future_slack=None)
             new_observed = parse_iso(projected["observedAt"], future_slack=None)
             if old_observed is None or new_observed is None or old_observed > new_observed:
+                return
+            unchanged = (
+                existing["sourceVersion"] == projected["sourceVersion"]
+                and existing["windows"] == projected["windows"]
+            )
+            if unchanged and new_observed - old_observed < CLAUDE_PLAN_REFRESH_SECONDS:
                 return
         atomic_json(path, root, projected, CLAUDE_PLAN_CACHE_MAX_BYTES)
     finally:
@@ -2112,28 +2158,24 @@ def project_official_claude_plan(root: Path) -> dict[str, Any]:
         return claude_plan("expired")
     windows: list[dict[str, Any]] = []
     for source_window in cache["windows"]:
-        resets_at = safe_int(source_window.get("resetsAt"), 0, 253_402_300_799)
-        if resets_at is None:
-            return claude_plan("source_error")
-        if current_epoch >= resets_at:
-            continue
-        percentage = safe_percentage(source_window.get("usedPercent"))
-        if percentage is None:
-            return claude_plan("source_error")
-        remaining = decimal_json_number(Decimal(100) - percentage[0])
-        if remaining is None:
-            return claude_plan("source_error")
         name = source_window["window"]
+        status, normalized = normalized_plan_window(
+            name, source_window.get("usedPercent"), source_window.get("resetsAt"), current_epoch
+        )
+        if status == "invalid":
+            return claude_plan("source_error")
+        if normalized is None:
+            continue
         specification = CLAUDE_PLAN_WINDOWS[name]
         windows.append(
             {
                 "key": f"general:{name}:{specification['minutes']}",
                 "scope": "general",
                 "label": specification["label"],
-                "usedPercent": percentage[1],
-                "remainingPercent": remaining,
+                "usedPercent": normalized["usedPercent"],
+                "remainingPercent": normalized["remainingPercent"],
                 "windowSeconds": specification["seconds"],
-                "resetsAt": iso_from_epoch(resets_at),
+                "resetsAt": iso_from_epoch(normalized["resetsAt"]),
             }
         )
     if not windows:

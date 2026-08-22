@@ -172,8 +172,8 @@ Exact focused result on 2026-08-22:
 ok - Codex official account protocol projects exact durations and honors 60-second single-flight caching
 ok - plan reader gates auth/version/schema, bounds timeout, and suppresses expired cached windows
 ok - Claude status-line plan projection gates versions, preserves decimals, and retains only allowlisted fields
-ok - Claude plan admission rejects malformed, non-finite, out-of-range, unsafe, oversized, and foreign observations
-ok - Claude plan cache is owner-only, no-follow, atomic under races, and passive on write failure
+ok - Claude plan admission rejects malformed, non-finite, out-of-range, unprojectable, unsafe, oversized, and foreign observations
+ok - Claude plan cache is owner-only, no-follow, atomic under races, self-healing, and passive on write failure
 ok - Claude official data is fresh for two minutes, expires windows independently, and falls back to explicit Manual data
 ok - manual Claude plan input is disabled by default, owner-only, bounded, explicit, and expiring
 ok - plan cache refuses symlinks and implementation excludes forbidden sources
@@ -181,7 +181,7 @@ FM_TEST_SUMMARY total=1 failed=0 skipped_gate=0
 ```
 
 The Claude fixtures feed only synthetic status-line JSON through the existing generation-bound receiver and make no model request.
-They cover the 2.1.79 refusal, 2.1.80 minimum, installed 2.1.221 shape, unrecognized major refusal, decimal and boundary percentages, independently missing and expired windows, malformed and unsafe values, cache containment, permission and no-follow behavior, concurrent writers, passive cache failure, two-minute freshness, fifteen-minute expiry, and official-to-manual precedence.
+They cover the 2.1.79 refusal, 2.1.80 minimum, installed 2.1.221 shape, unrecognized major refusal, decimal and boundary percentages, a percentage whose remaining complement cannot be projected, independently missing and expired windows, malformed and unsafe values, cache containment, permission and no-follow behavior, concurrent writers, replacement of malformed and stepped-clock cache content, the once-per-minute unchanged refresh, passive cache failure, two-minute freshness, fifteen-minute expiry, and official-to-manual precedence.
 Hostile status fields carry account, session, prompt, transcript, path, repository, command, credential, and arbitrary nested markers, and the assertions require all of them to be absent from the normalized cache and public snapshot.
 
 ## Codex live no-prompt smoke
