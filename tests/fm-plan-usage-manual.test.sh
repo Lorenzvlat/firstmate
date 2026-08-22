@@ -59,6 +59,7 @@ test_help_owns_guided_boundary() {
   assert_contains "$out" 'explicitly remove' "help omitted manual removal instruction"
   assert_contains "$out" 'Do not paste the screen' "help omitted pasted-output refusal"
   assert_contains "$out" 'FM_PLAN_USAGE_MANUAL=1' "help omitted disabled-by-default opt-in"
+  assert_contains "$out" 'no valid official cache' "help omitted official-source precedence"
   assert_contains "$out" 'without restarting Herdr or any shared daemon' "help omitted immediate refresh behavior"
   pass "manual importer help owns its bounded input and service opt-in mechanics"
 }

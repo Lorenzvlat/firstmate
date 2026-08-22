@@ -18,6 +18,7 @@ import stat
 import sys
 import time
 from collections import deque
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
 
@@ -88,9 +89,22 @@ REASON_ENUM = {
     "timeout",
     "source_error",
     "unsupported_schema",
-    "unsupported_machine_readable_source",
     "expired",
     "manual_snapshot",
+    "not_observed",
+}
+CLAUDE_STATUS_VERSION_RE = re.compile(
+    r"^(0|[1-9][0-9]{0,2})\.(0|[1-9][0-9]{0,5})\.(0|[1-9][0-9]{0,5})$",
+    re.ASCII,
+)
+CLAUDE_STATUS_MIN_VERSION = (2, 1, 80)
+CLAUDE_PLAN_CACHE_MAX_BYTES = 4 * 1024
+CLAUDE_PLAN_FRESH_SECONDS = 2 * 60
+CLAUDE_PLAN_STALE_SECONDS = 15 * 60
+CLAUDE_PLAN_RESET_SLACK_SECONDS = 5 * 60
+CLAUDE_PLAN_WINDOWS = {
+    "five_hour": {"minutes": 300, "seconds": 18_000, "label": "5-hour"},
+    "seven_day": {"minutes": 10_080, "seconds": 604_800, "label": "7-day"},
 }
 TELEMETRY_KEYS = {
     "schema",
@@ -153,6 +167,47 @@ def safe_int(value: Any, minimum: int = 0, maximum: int = MAX_SAFE_INTEGER) -> i
     if value < minimum or value > maximum:
         return None
     return value
+
+
+def decimal_json_number(value: Decimal) -> int | float | None:
+    """Return a JSON number only when its shortest decimal form is lossless."""
+    if not value.is_finite():
+        return None
+    integral = value.to_integral_value()
+    if value == integral:
+        integer = int(integral)
+        return integer if -MAX_SAFE_INTEGER <= integer <= MAX_SAFE_INTEGER else None
+    try:
+        number = float(value)
+    except (OverflowError, ValueError):
+        return None
+    if not math.isfinite(number):
+        return None
+    try:
+        if Decimal(str(number)) != value:
+            return None
+    except InvalidOperation:
+        return None
+    return number
+
+
+def safe_percentage(value: Any) -> tuple[Decimal, int | float] | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, Decimal):
+        decimal_value = value
+    elif isinstance(value, int):
+        decimal_value = Decimal(value)
+    elif isinstance(value, float) and math.isfinite(value):
+        decimal_value = Decimal(str(value))
+    else:
+        return None
+    if not decimal_value.is_finite() or decimal_value < 0 or decimal_value > 100:
+        return None
+    number = decimal_json_number(decimal_value)
+    if number is None:
+        return None
+    return decimal_value, number
 
 
 def safe_identifier(value: Any, regex: re.Pattern[str]) -> str | None:
@@ -637,41 +692,240 @@ def write_current_record(root: Path, task_id: str, record: dict[str, Any]) -> No
     atomic_json(root / f"{task_id}.telemetry.json", root, validated, 16 * 1024)
 
 
-def status_line_model(payload: bytes) -> str | None:
+def reject_json_constant(_value: str) -> None:
+    raise ValueError("non-finite json number")
+
+
+def status_line_payload(payload: bytes) -> dict[str, Any] | None:
     if len(payload) > 16 * 1024:
         return None
     try:
-        source = json.loads(payload.decode("utf-8"))
-    except (UnicodeError, json.JSONDecodeError):
+        source = json.loads(
+            payload.decode("utf-8"),
+            parse_float=Decimal,
+            parse_constant=reject_json_constant,
+        )
+    except (UnicodeError, json.JSONDecodeError, ValueError):
         return None
-    if not isinstance(source, dict):
+    return source if isinstance(source, dict) else None
+
+
+def status_line_model(source: dict[str, Any] | None) -> str | None:
+    if source is None:
         return None
     model_obj = source.get("model")
     model_id = model_obj.get("id") if isinstance(model_obj, dict) else None
     return safe_identifier(model_id, MODEL_RE)
 
 
+def supported_claude_status_version(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    match = CLAUDE_STATUS_VERSION_RE.fullmatch(value)
+    if match is None:
+        return None
+    version = tuple(int(part) for part in match.groups())
+    if version[0] != 2 or version < CLAUDE_STATUS_MIN_VERSION:
+        return None
+    return value
+
+
+def valid_claude_plan_cache(value: Any) -> dict[str, Any] | None:
+    expected = {"schema", "source", "sourceVersion", "observedAt", "windows"}
+    if not isinstance(value, dict) or set(value) != expected:
+        return None
+    if (
+        value.get("schema") != "fm-claude-plan-statusline-cache.v1"
+        or value.get("source") != "claude_code_statusline"
+    ):
+        return None
+    source_version = supported_claude_status_version(value.get("sourceVersion"))
+    observed_at = value.get("observedAt")
+    observed_epoch = parse_iso(observed_at)
+    windows = value.get("windows")
+    if source_version is None or observed_epoch is None or not isinstance(windows, list):
+        return None
+    if not 1 <= len(windows) <= len(CLAUDE_PLAN_WINDOWS):
+        return None
+    normalized_windows: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for window in windows:
+        if not isinstance(window, dict) or set(window) != {"window", "usedPercent", "resetsAt"}:
+            return None
+        name = window.get("window")
+        if name not in CLAUDE_PLAN_WINDOWS or name in seen:
+            return None
+        percentage = safe_percentage(window.get("usedPercent"))
+        resets_at = safe_int(window.get("resetsAt"), 0, 253_402_300_799)
+        if percentage is None or resets_at is None:
+            return None
+        maximum_reset = observed_epoch + CLAUDE_PLAN_WINDOWS[name]["seconds"]
+        maximum_reset += CLAUDE_PLAN_RESET_SLACK_SECONDS
+        if resets_at <= observed_epoch or resets_at > maximum_reset:
+            return None
+        seen.add(name)
+        normalized_windows.append(
+            {"window": name, "usedPercent": percentage[1], "resetsAt": resets_at}
+        )
+    normalized_windows.sort(key=lambda item: tuple(CLAUDE_PLAN_WINDOWS).index(item["window"]))
+    return {
+        "schema": "fm-claude-plan-statusline-cache.v1",
+        "source": "claude_code_statusline",
+        "sourceVersion": source_version,
+        "observedAt": observed_at,
+        "windows": normalized_windows,
+    }
+
+
+def project_claude_status_plan(source: dict[str, Any]) -> dict[str, Any] | None:
+    source_version = supported_claude_status_version(source.get("version"))
+    rate_limits = source.get("rate_limits")
+    if source_version is None or not isinstance(rate_limits, dict):
+        return None
+    observed_epoch = now_epoch()
+    windows: list[dict[str, Any]] = []
+    for name, specification in CLAUDE_PLAN_WINDOWS.items():
+        if name not in rate_limits:
+            continue
+        source_window = rate_limits.get(name)
+        if not isinstance(source_window, dict):
+            return None
+        if "used_percentage" not in source_window or "resets_at" not in source_window:
+            return None
+        percentage = safe_percentage(source_window.get("used_percentage"))
+        resets_at = safe_int(source_window.get("resets_at"), 0, 253_402_300_799)
+        if percentage is None or resets_at is None:
+            return None
+        if resets_at <= observed_epoch:
+            continue
+        if resets_at > observed_epoch + specification["seconds"] + CLAUDE_PLAN_RESET_SLACK_SECONDS:
+            return None
+        windows.append({"window": name, "usedPercent": percentage[1], "resetsAt": resets_at})
+    if not windows:
+        return None
+    return {
+        "schema": "fm-claude-plan-statusline-cache.v1",
+        "source": "claude_code_statusline",
+        "sourceVersion": source_version,
+        "observedAt": iso_from_epoch(observed_epoch),
+        "windows": windows,
+    }
+
+
+def acquire_claude_plan_lock(root: Path) -> int:
+    name = ".claude-plan-usage.lock"
+    path = root / name
+    if path.parent.resolve(strict=True) != root or not contained(root, path):
+        return -1
+    try:
+        before = path.lstat()
+    except FileNotFoundError:
+        before = None
+    except OSError:
+        return -1
+    if before is not None and (stat.S_ISLNK(before.st_mode) or not stat.S_ISREG(before.st_mode)):
+        return -1
+    flags = os.O_CREAT | os.O_RDWR
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        fd = os.open(path, flags, 0o600)
+    except OSError:
+        return -1
+    try:
+        opened = os.fstat(fd)
+        current = path.lstat()
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or opened.st_uid != os.geteuid()
+            or opened.st_nlink != 1
+            or (opened.st_dev, opened.st_ino) != (current.st_dev, current.st_ino)
+        ):
+            raise ValueError("unsafe lock")
+        os.fchmod(fd, 0o600)
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except (OSError, ValueError, BlockingIOError):
+        os.close(fd)
+        return -1
+    return fd
+
+
+def release_claude_plan_lock(fd: int) -> None:
+    fcntl.flock(fd, fcntl.LOCK_UN)
+    os.close(fd)
+
+
+def write_claude_plan_cache(root: Path, source: dict[str, Any]) -> None:
+    projected = project_claude_status_plan(source)
+    if projected is None:
+        return
+    lock_fd = acquire_claude_plan_lock(root)
+    if lock_fd < 0:
+        return
+    path = root / ".claude-plan-usage-cache.json"
+    try:
+        staging = staging_path(path)
+        try:
+            staging_info = secure_regular(
+                staging, root, CLAUDE_PLAN_CACHE_MAX_BYTES, owner_only=True
+            )
+        except FileNotFoundError:
+            staging_info = None
+        if staging_info is not None and staging_info.st_nlink != 1:
+            return
+        try:
+            existing_info = secure_regular(
+                path, root, CLAUDE_PLAN_CACHE_MAX_BYTES, owner_only=True
+            )
+        except FileNotFoundError:
+            existing_info = None
+        if existing_info is not None:
+            if existing_info.st_nlink != 1:
+                return
+            try:
+                existing_raw = read_secure_json(
+                    path, root, CLAUDE_PLAN_CACHE_MAX_BYTES, owner_only=True
+                )
+            except (OSError, ValueError, json.JSONDecodeError, UnicodeError):
+                return
+            existing = valid_claude_plan_cache(existing_raw)
+            if existing is None:
+                return
+            old_observed = parse_iso(existing["observedAt"], future_slack=None)
+            new_observed = parse_iso(projected["observedAt"], future_slack=None)
+            if old_observed is None or new_observed is None or old_observed > new_observed:
+                return
+        atomic_json(path, root, projected, CLAUDE_PLAN_CACHE_MAX_BYTES)
+    finally:
+        release_claude_plan_lock(lock_fd)
+
+
 def claude_status_update(root: Path, task_id: str, generation: str, payload: bytes) -> None:
     if not TASK_ID_RE.fullmatch(task_id) or not GENERATION_RE.fullmatch(generation):
         return
+    source = status_line_payload(payload)
     with RecordLock(root, task_id):
         record = load_current_record(root, task_id)
         if record["generation"] != generation or record["harness"] != "claude":
             return
         note_worker_liveness(root, task_id)
-        model_id = status_line_model(payload)
-        if model_id is None:
-            return
-        if record["status"] != "unavailable" and record["model"].get("id") == model_id:
-            return
-        provider = record["model"].get("provider")
-        record["model"] = {"provider": provider, "id": model_id}
-        record["observedAt"] = iso_from_epoch(now_epoch())
-        if record["status"] == "unavailable":
-            record["status"] = "partial"
-            record["coverage"] = "since_observed"
-        record["final"] = False
-        write_current_record(root, task_id, record)
+        model_id = status_line_model(source)
+        if model_id is not None and (
+            record["status"] == "unavailable" or record["model"].get("id") != model_id
+        ):
+            provider = record["model"].get("provider")
+            record["model"] = {"provider": provider, "id": model_id}
+            record["observedAt"] = iso_from_epoch(now_epoch())
+            if record["status"] == "unavailable":
+                record["status"] = "partial"
+                record["coverage"] = "since_observed"
+            record["final"] = False
+            write_current_record(root, task_id, record)
+    if source is not None:
+        try:
+            write_claude_plan_cache(root, source)
+        except (OSError, ValueError, json.JSONDecodeError, UnicodeError):
+            pass
 
 
 def run_bounded_command(
@@ -1815,7 +2069,9 @@ def project_plan(source: dict[str, Any]) -> dict[str, Any] | None:
     }
 
 
-def claude_plan() -> dict[str, Any]:
+def claude_plan(reason: str = "not_observed") -> dict[str, Any]:
+    if reason not in REASON_ENUM:
+        reason = "source_error"
     return {
         "provider": "claude",
         "product": "claude_subscription",
@@ -1823,8 +2079,75 @@ def claude_plan() -> dict[str, Any]:
         "status": "unavailable",
         "observedAt": None,
         "expiresAt": None,
-        "reason": "unsupported_machine_readable_source",
+        "reason": reason,
         "windows": [],
+    }
+
+
+def cached_claude_plan(root: Path) -> tuple[dict[str, Any] | None, str]:
+    path = root / ".claude-plan-usage-cache.json"
+    try:
+        info = secure_regular(path, root, CLAUDE_PLAN_CACHE_MAX_BYTES, owner_only=True)
+        if info.st_nlink != 1:
+            return None, "source_error"
+        raw = read_secure_json(path, root, CLAUDE_PLAN_CACHE_MAX_BYTES, owner_only=True)
+    except FileNotFoundError:
+        return None, "not_observed"
+    except (OSError, ValueError, json.JSONDecodeError, UnicodeError):
+        return None, "source_error"
+    record = valid_claude_plan_cache(raw)
+    return (record, "source_error") if record is None else (record, "")
+
+
+def project_official_claude_plan(root: Path) -> dict[str, Any]:
+    cache, reason = cached_claude_plan(root)
+    if cache is None:
+        return claude_plan(reason)
+    observed_epoch = parse_iso(cache["observedAt"])
+    if observed_epoch is None:
+        return claude_plan("source_error")
+    current_epoch = now_epoch()
+    age = current_epoch - observed_epoch
+    if age >= CLAUDE_PLAN_STALE_SECONDS:
+        return claude_plan("expired")
+    windows: list[dict[str, Any]] = []
+    for source_window in cache["windows"]:
+        resets_at = safe_int(source_window.get("resetsAt"), 0, 253_402_300_799)
+        if resets_at is None:
+            return claude_plan("source_error")
+        if current_epoch >= resets_at:
+            continue
+        percentage = safe_percentage(source_window.get("usedPercent"))
+        if percentage is None:
+            return claude_plan("source_error")
+        remaining = decimal_json_number(Decimal(100) - percentage[0])
+        if remaining is None:
+            return claude_plan("source_error")
+        name = source_window["window"]
+        specification = CLAUDE_PLAN_WINDOWS[name]
+        windows.append(
+            {
+                "key": f"general:{name}:{specification['minutes']}",
+                "scope": "general",
+                "label": specification["label"],
+                "usedPercent": percentage[1],
+                "remainingPercent": remaining,
+                "windowSeconds": specification["seconds"],
+                "resetsAt": iso_from_epoch(resets_at),
+            }
+        )
+    if not windows:
+        return claude_plan("expired")
+    status_value = "fresh" if age <= CLAUDE_PLAN_FRESH_SECONDS else "stale"
+    return {
+        "provider": "claude",
+        "product": "claude_subscription",
+        "plan": None,
+        "status": status_value,
+        "observedAt": cache["observedAt"],
+        "expiresAt": iso_from_epoch(observed_epoch + CLAUDE_PLAN_STALE_SECONDS),
+        "reason": None,
+        "windows": windows,
     }
 
 
@@ -1996,6 +2319,20 @@ def manual_claude_plan(config: Path, enabled: bool) -> dict[str, Any]:
         record["reason"] = "source_error"
         return record
     return project_manual_claude(raw)
+
+
+def selected_claude_plan(root: Path, config: Path, manual_enabled: bool) -> dict[str, Any]:
+    official = project_official_claude_plan(root)
+    if official["status"] in {"fresh", "stale"}:
+        return official
+    manual = manual_claude_plan(config, manual_enabled)
+    if manual["status"] == "manual":
+        return manual
+    if official["reason"] == "expired":
+        return official
+    if manual_enabled and manual["reason"] in {"expired", "source_error"}:
+        return manual
+    return official
 
 
 PROMPT_RETRIES = 3
@@ -2236,9 +2573,9 @@ def snapshot_plan(root: Path, manual_enabled: bool, config: Path) -> dict[str, A
                 fcntl.flock(fd, fcntl.LOCK_UN)
             os.close(fd)
     result = {
-        "schema": "fm-plan-usage-snapshot.v1",
+        "schema": "fm-plan-usage-snapshot.v2",
         "generatedAt": iso_from_epoch(now_epoch()),
-        "providers": [codex, manual_claude_plan(config, manual_enabled)],
+        "providers": [codex, selected_claude_plan(root, config, manual_enabled)],
     }
     encoded = json.dumps(result, separators=(",", ":")).encode("utf-8")
     if len(encoded) > 64 * 1024:

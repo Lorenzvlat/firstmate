@@ -14,7 +14,7 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-fleet-sync.sh`       | Refresh project clones with safe fast-forwards, self-heals, `STUCK:` reports, branch pruning, and bounded recovery from an orphaned `.git/packed-refs.lock` |
 | `fm-fleet-snapshot.sh`   | Print the read-only structured fleet snapshot JSON (schema `fm-fleet-snapshot.v1`)   |
 | `fm-worker-telemetry-snapshot.sh` | Print the bounded local worker model/token projection (`fm-worker-telemetry-snapshot.v1`) |
-| `fm-plan-usage-snapshot.sh` | Print the bounded Codex/Claude subscription-plan projection (`fm-plan-usage-snapshot.v1`) |
+| `fm-plan-usage-snapshot.sh` | Print the bounded Codex/Claude subscription-plan projection (`fm-plan-usage-snapshot.v2`) |
 | `fm-plan-usage-manual.sh` | Guide an operator through exclusively creating the fixed manual Claude plan snapshot |
 | `fm-worker-telemetry-init.sh` | Initialize one private generation-bound worker telemetry record at spawn |
 | `fm-pi-worker-extension.sh` | Generate one task-scoped Pi turn-end and telemetry extension |

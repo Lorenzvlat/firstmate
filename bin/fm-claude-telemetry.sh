@@ -2,6 +2,8 @@
 # Own the privacy-pinned Claude Code status-line/OTLP telemetry lifecycle.
 # This helper is internal to fm-spawn/fm-teardown and is always best-effort at
 # those call sites so telemetry can never control worker execution.
+# The status action also admits documented subscription rate-limit fields into
+# the bounded home-level plan cache without retaining the raw status payload.
 #
 # Usage:
 #   fm-claude-telemetry.sh start <task-id> <owner-only-env-file>

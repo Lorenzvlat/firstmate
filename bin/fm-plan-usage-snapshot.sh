@@ -2,10 +2,10 @@
 # Print the bounded read-only Codex and Claude subscription-plan projection.
 #
 # Usage: fm-plan-usage-snapshot.sh --json
-# Output: fm-plan-usage-snapshot.v1 JSON, at most 64 KiB.
+# Output: fm-plan-usage-snapshot.v2 JSON, at most 64 KiB.
 # Codex uses only official app-server account reads and a private 60-second
-# single-flight cache. Claude is the explicit supported-source refusal unless
-# service startup sets FM_PLAN_USAGE_MANUAL=1 for the fixed owner-only manual file.
+# single-flight cache. Claude uses official activity-coupled status-line rate
+# limits, with the fixed owner-only manual file as an explicit opt-in fallback.
 # docs/worker-telemetry.md owns the complete contract and source policy.
 set -eu
 

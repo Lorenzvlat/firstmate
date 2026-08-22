@@ -21,6 +21,25 @@ Python 3.13.14
 v26.5.0
 ```
 
+## 2026-08-22 Claude status-line plan source version
+
+Command:
+
+```sh
+claude --version
+```
+
+Exact output:
+
+```text
+2.1.221 (Claude Code)
+```
+
+Anthropic's current [status-line schema](https://code.claude.com/docs/en/statusline) defines the `rate_limits.five_hour` and `rate_limits.seven_day` subscription windows, including decimal used percentages and Unix reset seconds.
+Anthropic's [changelog](https://code.claude.com/docs/en/changelog) records that Claude Code 2.1.80 added these fields.
+The installed 2.1.221 client therefore satisfies Firstmate's supported 2.x at-or-above-2.1.80 gate without an update.
+No live numeric field was invoked for this evidence because populating it solely for verification would require a model response.
+
 ## Pi extension surface
 
 The installed Pi 0.80.10 documentation defines `ctx.model`, `model_select`, finalized `message_end`, and assistant `usage.input`, `usage.output`, `usage.cacheRead`, `usage.cacheWrite`, and `usage.totalTokens`.
@@ -32,7 +51,7 @@ Command:
 bin/fm-test-run.sh tests/fm-worker-telemetry.test.sh
 ```
 
-Exact focused result on 2026-08-12 after the status-line import, whitespace-identity, collector self-exit, fixed-staging, and test-registry fixes:
+Exact focused result on 2026-08-22 after the subscription-plan projection was added to the existing status-line receiver:
 
 ```text
 ok - worker snapshot bounds count, bytes, owner mode, symlinks, and generic warning enums
@@ -42,7 +61,7 @@ ok - Pi turn-end signaling survives a rejected telemetry registration, malformed
 ok - Claude collector is loopback-only, privacy-pinned, deduplicated, allowlisted, and task-scoped
 ok - snapshot deadline is never absorbed by a projection handler and a bounded command never waits on an inherited pipe
 ok - Claude uncounted usage downgrades coverage once and never restores full_worker
-ok - status-line renders update the record only for this task, generation, and a changed model
+ok - status-line renders independently update generation-bound model and plan projections
 ok - Claude freshness tracks observed worker activity and ages to stale once that activity stops
 ok - a failed Claude start publishes no environment and leaves no orphan collector
 ok - a status-line render updates the record without loading any collector module
@@ -147,15 +166,23 @@ Command:
 bin/fm-test-run.sh tests/fm-plan-usage.test.sh
 ```
 
-Exact focused result on 2026-08-01:
+Exact focused result on 2026-08-22:
 
 ```text
 ok - Codex official account protocol projects exact durations and honors 60-second single-flight caching
 ok - plan reader gates auth/version/schema, bounds timeout, and suppresses expired cached windows
+ok - Claude status-line plan projection gates versions, preserves decimals, and retains only allowlisted fields
+ok - Claude plan admission rejects malformed, non-finite, out-of-range, unsafe, oversized, and foreign observations
+ok - Claude plan cache is owner-only, no-follow, atomic under races, and passive on write failure
+ok - Claude official data is fresh for two minutes, expires windows independently, and falls back to explicit Manual data
 ok - manual Claude plan input is disabled by default, owner-only, bounded, explicit, and expiring
 ok - plan cache refuses symlinks and implementation excludes forbidden sources
 FM_TEST_SUMMARY total=1 failed=0 skipped_gate=0
 ```
+
+The Claude fixtures feed only synthetic status-line JSON through the existing generation-bound receiver and make no model request.
+They cover the 2.1.79 refusal, 2.1.80 minimum, installed 2.1.221 shape, unrecognized major refusal, decimal and boundary percentages, independently missing and expired windows, malformed and unsafe values, cache containment, permission and no-follow behavior, concurrent writers, passive cache failure, two-minute freshness, fifteen-minute expiry, and official-to-manual precedence.
+Hostile status fields carry account, session, prompt, transcript, path, repository, command, credential, and arbitrary nested markers, and the assertions require all of them to be absent from the normalized cache and public snapshot.
 
 ## Codex live no-prompt smoke
 
@@ -173,15 +200,15 @@ FM_STATE_OVERRIDE="$PWD/$state" bin/fm-plan-usage-snapshot.sh --json \
 rm -rf "$state"
 ```
 
-Exact output on 2026-08-01:
+Exact output on 2026-08-22:
 
 ```text
-schema=fm-plan-usage-snapshot.v1
+schema=fm-plan-usage-snapshot.v2
 provider=codex
 status=fresh
 plan_present=true
 window_labels=7-day
-claude_reason=unsupported_machine_readable_source
+claude_reason=not_observed
 ```
 
 The allowlist intentionally omits percentages, reset times, account data, session data, and internal limit identifiers from tracked evidence.
