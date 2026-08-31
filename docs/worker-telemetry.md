@@ -136,7 +136,7 @@ The single kill path for a misbehaving collector is `bin/fm-claude-telemetry.sh 
 The launch also writes a `statusLine` command into that worker's task-local `.claude/settings.local.json`.
 It is scoped to the worker worktree, is git-excluded, and is removed with the worktree, but it does override any global status line the captain configured for the duration of that task.
 Its effects are the bounded model projection described below and the home-level plan projection owned by [Claude subscription-plan source](#claude-subscription-plan-source).
-The status-line render loads no collector, subprocess, or nonce module, and it rewrites neither projection when nothing changed, so it stays a cheap per-render call.
+The status-line render loads no collector, subprocess, or nonce module, leaves an unchanged model record untouched, and refreshes an unchanged plan cache at most once per minute, so it stays a cheap per-render call.
 
 Claude telemetry is enabled for a newly launched non-secondmate worker only when the built-in privacy self-test passes and a task-scoped loopback collector starts successfully.
 Otherwise Claude launches normally and worker telemetry remains unavailable.
