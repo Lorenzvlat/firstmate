@@ -19,9 +19,10 @@
 # receives at most three generic retries without reflecting the rejected value.
 # A failed input, validation, or write leaves every existing target intact.
 # FM_HOME selects the effective home; FM_CONFIG_OVERRIDE is test-only.
-# Manual projection remains disabled unless the dashboard service was started
-# with FM_PLAN_USAGE_MANUAL=1. An already opted-in dashboard reads a successful
-# creation or operator removal on its next refresh; shared daemons need no restart.
+# Manual fallback remains disabled unless the dashboard service was started
+# with FM_PLAN_USAGE_MANUAL=1. An already opted-in dashboard considers a
+# successful creation or operator removal on its next refresh when no valid
+# official cache takes precedence; shared daemons need no restart.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -43,9 +44,10 @@ YYYY-MM-DDTHH:MM:SS.000Z because the schema stores whole Unix seconds.
 An invalid field or conflicting window identity receives at most three retries;
 the rejected value is never printed by this command.
 
-The manual source is disabled by default. Start the dashboard service with
+The manual fallback is disabled by default. Start the dashboard service with
 FM_PLAN_USAGE_MANUAL=1 to opt in. Once opted in, creation and explicit operator
-removal take effect on the next refresh without restarting Herdr or any shared daemon.
+removal are considered on the next refresh when no valid official cache takes
+precedence, without restarting Herdr or any shared daemon.
 Before another import, explicitly remove the fixed local
 config/plan-usage-manual.json snapshot yourself. This helper has no clear,
 overwrite, quarantine, restore, or replacement action.
@@ -70,7 +72,7 @@ case $1 in
       printf 'fm-plan-usage-manual: refused invalid input or unsafe target; prior snapshot unchanged\n' >&2
       exit 1
     fi
-    printf 'Saved Manual Claude plan snapshot. An opted-in dashboard will display it on its next refresh; no Herdr or shared-daemon restart is needed. If it is not opted in, set FM_PLAN_USAGE_MANUAL=1 before the dashboard service next starts.\n'
+    printf 'Saved Manual Claude plan snapshot. An opted-in dashboard will use it as a fallback when no valid official cache takes precedence; no Herdr or shared-daemon restart is needed. If it is not opted in, set FM_PLAN_USAGE_MANUAL=1 before the dashboard service next starts.\n'
     ;;
   *)
     usage >&2

@@ -34,10 +34,11 @@ This preference is local to each Firstmate home and is not part of secondmate in
 ## Manual Claude plan snapshot (config/plan-usage-manual.json)
 
 Manual Claude subscription-plan input is disabled by default.
-A dashboard service must set `FM_PLAN_USAGE_MANUAL=1` before startup to enable the fixed local `config/plan-usage-manual.json` source under the effective Firstmate home.
+A supported Claude Code worker automatically supplies activity-coupled subscription usage through the private status-line receiver after an ordinary Claude response.
+A dashboard service may set `FM_PLAN_USAGE_MANUAL=1` before startup to enable the fixed local `config/plan-usage-manual.json` fallback under the effective Firstmate home.
 Run `bin/fm-plan-usage-manual.sh set` to transcribe the bounded numeric values and UTC times from Claude's interactive `/usage` screen.
 Before running `set` again, explicitly remove the fixed local snapshot yourself; the helper does not clear or replace it.
-An already opted-in dashboard reads a successful `set` or explicit operator removal on its next refresh without restarting Herdr or a shared daemon.
+An already opted-in dashboard considers a successful `set` or explicit operator removal on its next refresh when no valid official cache takes precedence, without restarting Herdr or a shared daemon.
 The file is local, gitignored, owner-only, not inherited into secondmate homes, and has no browser write path.
 [`worker-telemetry.md`](worker-telemetry.md#disabled-manual-claude-boundary) owns its exact schema, containment, expiry, projection, and refusal contract.
 
@@ -384,7 +385,7 @@ FM_PROJECTS_OVERRIDE=    # alternate projects dir, mainly for tests
 FM_CONFIG_OVERRIDE=      # alternate config dir, mainly for tests
 FM_PROC_ROOT_OVERRIDE=   # alternate /proc root for the Linux process-identity read in fm-wake-lib.sh, mainly for tests
 FM_BACKEND=             # optional runtime backend override for new spawns; tmux/herdr/zellij/orca/cmux support ship/scout spawns, codex-app is not accepted
-FM_PLAN_USAGE_MANUAL=0  # only 1, set before a dashboard service starts, enables the disabled-by-default manual Claude plan source ("Manual Claude plan snapshot" above)
+FM_PLAN_USAGE_MANUAL=0  # only 1, set before a dashboard service starts, enables the disabled-by-default manual Claude plan fallback ("Manual Claude plan snapshot" above)
 HERDR_SESSION=default  # herdr-only: named session for normal backend ops; not enough for destructive cleanup (docs/herdr-backend.md)
 FM_BACKEND_HERDR_COMPOSER_LINES=20  # herdr-only: tail lines scanned by composer-state guard/fallback paths; idle-baseline submit confirmation uses agent-state
 FM_BACKEND_HERDR_IDLE_RE='^Type a message\.\.\.$'  # herdr-only: empty-composer placeholder regex after shared ghost extraction plus border and prompt stripping

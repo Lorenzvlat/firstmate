@@ -22,7 +22,7 @@ Subscription-plan telemetry is available only through this fixed command:
 bin/fm-plan-usage-snapshot.sh --json
 ```
 
-The command emits `fm-plan-usage-snapshot.v1`, always returns one Codex record and one Claude record, and emits at most 64 KiB.
+The command emits `fm-plan-usage-snapshot.v2`, always returns one Codex record and one Claude record, and emits at most 64 KiB.
 It takes no account, command, endpoint, credential, provider, or source selection from a request.
 
 These commands are independent from `fm-fleet-snapshot.v1` so a local lifecycle read never acquires a vendor-network dependency.
@@ -135,14 +135,15 @@ The single kill path for a misbehaving collector is `bin/fm-claude-telemetry.sh 
 
 The launch also writes a `statusLine` command into that worker's task-local `.claude/settings.local.json`.
 It is scoped to the worker worktree, is git-excluded, and is removed with the worktree, but it does override any global status line the captain configured for the duration of that task.
-Its only effect is the model projection described below; the status-line render loads no collector, subprocess, or nonce module, so it stays a cheap per-render call.
+Its effects are the bounded model projection described below and the home-level plan projection owned by [Claude subscription-plan source](#claude-subscription-plan-source).
+The status-line render loads no collector, subprocess, or nonce module, leaves an unchanged model record untouched, and refreshes an unchanged plan cache at most once per minute, so it stays a cheap per-render call.
 
 Claude telemetry is enabled for a newly launched non-secondmate worker only when the built-in privacy self-test passes and a task-scoped loopback collector starts successfully.
 Otherwise Claude launches normally and worker telemetry remains unavailable.
 The launch sources that environment only when it is readable at launch time and never conditions the worker command on that read.
 A start that cannot publish its launch environment retires its own collector rather than leaving it running.
 
-The official Claude status-line JSON is the idle/startup model source.
+The official Claude status-line JSON is the idle/startup model source and the activity-coupled subscription-plan source.
 A status-line update is applied only for a valid task ID whose record carries the Claude harness and the exact generation that launch bound into the status-line command.
 The official Claude Code OTel `claude_code.api_request` log event is the cumulative token source.
 Provider identity comes from an explicit official Bedrock, Vertex, or Foundry launch mode, or from an allowlisted projection of official `claude auth status` under the launch environment.
@@ -202,7 +203,7 @@ The normalized output shape is:
 
 ```json
 {
-  "schema": "fm-plan-usage-snapshot.v1",
+  "schema": "fm-plan-usage-snapshot.v2",
   "generatedAt": "2026-08-01T00:00:00.000Z",
   "providers": [
     {
@@ -229,11 +230,21 @@ The normalized output shape is:
       "provider": "claude",
       "product": "claude_subscription",
       "plan": null,
-      "status": "unavailable",
-      "observedAt": null,
-      "expiresAt": null,
-      "reason": "unsupported_machine_readable_source",
-      "windows": []
+      "status": "fresh",
+      "observedAt": "2026-08-01T00:00:00.000Z",
+      "expiresAt": "2026-08-01T00:15:00.000Z",
+      "reason": null,
+      "windows": [
+        {
+          "key": "general:five_hour:300",
+          "scope": "general",
+          "label": "5-hour",
+          "usedPercent": 23.5,
+          "remainingPercent": 76.5,
+          "windowSeconds": 18000,
+          "resetsAt": "2026-08-01T04:43:20.000Z"
+        }
+      ]
     }
   ]
 }
@@ -242,9 +253,10 @@ The normalized output shape is:
 The provider array has exactly the Codex and Claude records in that order.
 Each provider has at most twelve windows.
 `status` is exactly `fresh`, `stale`, `unavailable`, or `manual`.
-`reason` is `null` or exactly `not_authenticated`, `api_key_not_subscription`, `timeout`, `source_error`, `unsupported_schema`, `unsupported_machine_readable_source`, `expired`, or `manual_snapshot`.
+`reason` is `null` or exactly `not_authenticated`, `api_key_not_subscription`, `timeout`, `source_error`, `unsupported_schema`, `expired`, `manual_snapshot`, or `not_observed`.
 Official and manual plans are admitted only from their fixed vendor enums.
-Percentages are integers from zero through 100, and remaining percentage is exactly `100 - usedPercent`.
+Percentages are finite JSON numbers from zero through 100, and remaining percentage is exactly `100 - usedPercent` without a floating-point display artifact.
+Codex and manual percentages remain integers, while the official Claude source may supply decimals.
 Window seconds are exactly documented duration minutes multiplied by 60 with safe-integer checks.
 Reset values are canonical millisecond ISO timestamps converted from documented Unix seconds.
 
@@ -277,28 +289,76 @@ The cache is a direct regular-file child of the real state directory, refuses sy
 
 ## Claude subscription-plan source
 
-Claude subscription-plan usage defaults to:
+Claude subscription-plan usage comes from Anthropic's documented [Claude Code status-line JSON](https://code.claude.com/docs/en/statusline) for Claude.ai Pro and Max subscriptions.
+The official [Claude Code changelog](https://code.claude.com/docs/en/changelog) records that version 2.1.80 added this source.
+Firstmate accepts supported Claude Code 2.x versions at or above 2.1.80 and rejects older or unrecognized major versions.
+The existing task-local status-line command sends the official JSON to the passive 16 KiB `fm-claude-telemetry.sh status` receiver.
+The receiver admits plan data only after its existing task ID, launch generation, and Claude harness checks succeed.
+No separate Claude process, model request, credential read, or network request is made for this projection.
+
+The complete plan allowlist is:
+
+- `version`.
+- `rate_limits.five_hour.used_percentage`.
+- `rate_limits.five_hour.resets_at`.
+- `rate_limits.seven_day.used_percentage`.
+- `rate_limits.seven_day.resets_at`.
+
+Either named window may be absent independently.
+A present window must contain both values.
+The percentage must be a finite JSON number from zero through 100 and must round-trip through the public JSON number representation without changing its decimal value.
+Its published remaining complement must round-trip on the same rule, so a percentage that could not be projected later is refused at admission instead of being cached.
+The reset must be a safe integer Unix epoch strictly after observation and no later than the named window duration plus five minutes after observation.
+A present malformed window rejects the complete observation, while an already expired window is omitted and another valid window may still refresh the cache.
+At least one valid unexpired window is required for a write.
+Unknown status-line fields are ignored and never persisted.
+The identical admission rule is applied by the writer, the cache validator, and the public projection, so no value can pass one gate and fail the next.
+
+The private cache schema is:
 
 ```json
 {
-  "provider": "claude",
-  "product": "claude_subscription",
-  "plan": null,
-  "status": "unavailable",
-  "observedAt": null,
-  "expiresAt": null,
-  "reason": "unsupported_machine_readable_source",
-  "windows": []
+  "schema": "fm-claude-plan-statusline-cache.v1",
+  "source": "claude_code_statusline",
+  "sourceVersion": "2.1.221",
+  "observedAt": "2026-08-01T00:00:00.000Z",
+  "windows": [
+    {
+      "window": "five_hour",
+      "usedPercent": 23.5,
+      "resetsAt": 1785559400
+    }
+  ]
 }
 ```
 
-The installed Claude Code client has no supported machine-readable subscription-plan usage source.
-Firstmate never automates `/usage`, claude.ai, an undocumented endpoint, credential files, Keychain, or terminal output.
-Worker token totals are never converted into a plan percentage.
+The cache is the direct state child `state/.claude-plan-usage-cache.json`, is owned by the current user, grants no group or other permissions, is not a symlink, has one link, and is at most 4 KiB.
+Concurrent receivers use the separate owner-only no-follow `state/.claude-plan-usage.lock` without waiting when another writer holds it.
+The fixed same-directory staging file is atomically replaced while that lock is held, and an unsafe existing cache or staging path is refused rather than followed or overwritten.
+Existing cache content that is unreadable or no longer valid is replaced only after every containment, ownership, permission, no-follow, link-count, and size check on that path has passed, so a corrupt or stepped-clock cache recovers on the next observation instead of blocking the source permanently.
+A newer observation whose source version and windows are unchanged rewrites the cache at most once per minute, while any changed window is written immediately; the two-minute fresh and fifteen-minute stale contracts are unaffected because an active worker refreshes well inside both.
+The receiver never holds a task telemetry lock while acquiring the shared plan lock.
+Cache failure is passive and cannot prevent the already-authorized model projection, worker liveness observation, Stop signaling, collector operation, or Claude worker execution.
+Task cleanup deliberately leaves this home-level account cache intact.
+
+A valid cache projects the fixed five-hour and seven-day labels and durations from the source field names.
+The official projection has `plan: null`, because the status-line fields are authoritative without adding a separate entitlement read.
+It has `status: fresh` through two minutes after `observedAt`, `status: stale` until fifteen minutes, `reason: null`, and `expiresAt` exactly fifteen minutes after observation.
+Each window is removed independently at its own reset.
+Once all windows have reset or fifteen minutes have elapsed, no official percentage is exposed and the official result is unavailable with `reason: expired`.
+When no compatible worker has supplied a valid observation, the result is unavailable with `reason: not_observed`.
+An unsafe or malformed cache is unavailable with the generic `source_error` reason and never reflects its contents.
+
+Source precedence is a valid unexpired official cache, then a valid explicitly enabled manual snapshot, then the bounded unavailable result.
+Official data never claims a manual plan enum, and manual data remains visibly `status: manual` with `reason: manual_snapshot`.
+The source is activity-coupled because Claude Code updates the values after ordinary Claude responses rather than through an idle account poll.
+Usage from another device is reflected only after a later local Claude response refreshes the status-line values.
+
+Firstmate never automates `/usage`, scrapes claude.ai, calls an undocumented authenticated endpoint, reads credential files or Keychain, parses terminal output or transcripts, starts browser automation, or infers subscription usage from worker tokens, local context, cost, API billing, or organization analytics.
 
 ### Disabled manual Claude boundary
 
-A service may opt into an owner-maintained manual Claude snapshot only by setting `FM_PLAN_USAGE_MANUAL=1` before it starts.
+A service may opt into an owner-maintained manual Claude fallback only by setting `FM_PLAN_USAGE_MANUAL=1` before it starts.
 The default and every other value keep the manual source disabled.
 The fixed source is `config/plan-usage-manual.json` under the effective Firstmate home or its test-only `FM_CONFIG_OVERRIDE`.
 The only supported mutation command is the local guided `bin/fm-plan-usage-manual.sh` helper, whose header and `--help` own its exact mechanics.
@@ -329,7 +389,7 @@ The private input schema is:
 The file must be a direct regular-file child of the real config directory, must not be a symlink, must be owned by the current user, must grant no group or other permissions, and must be at most 16 KiB.
 Its object and every window use exact keys.
 It accepts at most twelve numeric windows, only the fixed `primary` and `secondary` slots, the fixed Claude plan enum, safe integer percentages and durations, canonical observed/expiry timestamps, and documented Unix reset seconds.
-The output derives keys, labels, seconds, remaining percentage, and reset timestamps exactly as it does for official windows.
+The output derives keys from the fixed manual slots and mechanically derives labels, seconds, remaining percentage, and reset timestamps.
 A valid unexpired file is visibly `status: manual`, `reason: manual_snapshot`, and carries its explicit `expiresAt` and age source `observedAt`.
 An expired file or reset window exposes no percentages and returns unavailable with `reason: expired`.
 A missing, unsafe, oversized, malformed, prose-bearing, or unsupported manual input exposes no source value and returns unavailable with a generic reason.
@@ -339,7 +399,7 @@ A manual snapshot can never claim official or fresh provenance.
 
 Task cleanup removes only that task's generated Pi extension, writer record, writer lock, writer staging leftover, Claude activity marker, Claude collector handshake files, owner-only Claude launch environment, and identity-validated collector.
 The fixed removal list is applied by name even when the telemetry helper itself cannot run, so no task-scoped telemetry file outlives its task.
-Plan cache state is home-local and contains only the normalized provider record.
+Plan cache state is home-local and contains only normalized allowlisted records.
 No raw Pi event, Claude status payload, OTel batch, Codex app-server line, authentication object, account identity, session/thread/request identifier, prompt, response, tool content, terminal content, credential, path, command, cost, or raw log is persisted by this feature.
 
 A dashboard consumer must invoke only the two fixed read-only commands, validate every nested field, join only against known fleet task IDs, replace the task ID with its existing opaque alias, and discard the source task ID before browser projection.

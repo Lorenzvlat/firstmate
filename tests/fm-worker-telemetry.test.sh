@@ -480,12 +480,18 @@ test_claude_status_line_skips_redundant_record_writes() {
   generation=$(FM_STATE_OVERRIDE="$state" "$INIT" statusline-x1 claude) \
     || fail "status-line fixture init failed"
   printf '%s' '{"model":{"id":"claude-sonnet-4-5"}}' \
-    | FM_STATE_OVERRIDE="$state" "$CLAUDE" status statusline-x1 "$generation"
+    | FM_TELEMETRY_TEST_MODE=1 FM_TELEMETRY_TEST_NOW=1785542400 \
+      FM_STATE_OVERRIDE="$state" "$CLAUDE" status statusline-x1 "$generation"
   first=$(file_inode "$record")
-  printf '%s' '{"model":{"id":"claude-sonnet-4-5"}}' \
-    | FM_STATE_OVERRIDE="$state" "$CLAUDE" status statusline-x1 "$generation"
+  printf '%s' '{"version":"2.1.221","model":{"id":"claude-sonnet-4-5"},"rate_limits":{"five_hour":{"used_percentage":23.5,"resets_at":1785559400}}}' \
+    | FM_TELEMETRY_TEST_MODE=1 FM_TELEMETRY_TEST_NOW=1785542400 \
+      FM_STATE_OVERRIDE="$state" "$CLAUDE" status statusline-x1 "$generation"
   second=$(file_inode "$record")
   [ "$first" = "$second" ] || fail "an unchanged status-line render rewrote the telemetry record"
+  assert_present "$state/.claude-plan-usage-cache.json" \
+    "an unchanged model prevented the status-line plan cache write"
+  [ "$(file_mode "$state/.claude-plan-usage-cache.json")" = 600 ] \
+    || fail "status-line plan cache is not owner-only"
   printf '%s' '{"model":{"id":"claude-opus-4"}}' \
     | FM_STATE_OVERRIDE="$state" "$CLAUDE" status statusline-x1 "$generation"
   third=$(file_inode "$record")
@@ -500,7 +506,7 @@ test_claude_status_line_skips_redundant_record_writes() {
     || fail "an unvalidated status-line task id created a lock outside the state root"
   out=$(FM_STATE_OVERRIDE="$state" "$SNAPSHOT" --json) || fail "status-line worker snapshot failed"
   json_assert "$out" 'value["workers"][0]["model"] == {"provider":None,"id":"claude-opus-4"}'
-  pass "status-line renders update the record only for this task, generation, and a changed model"
+  pass "status-line renders independently update generation-bound model and plan projections"
 }
 
 test_claude_freshness_follows_worker_liveness() {
