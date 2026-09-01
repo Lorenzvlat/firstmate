@@ -421,6 +421,272 @@ test_pi_prominence_requires_exact_valid_config() {
   pass "Herdr Pi prominence requires the exact validated sidebar row"
 }
 
+pi_presentation_schema() {
+  jq -nc '
+    {
+      schemas: {
+        request: {
+          oneOf: [{
+            properties: {
+              method: {const: "client.presentation.pi", type: "string"},
+              params: {"$ref": "#/schemas/request/$defs/ClientPresentationPiParams"}
+            },
+            required: ["method", "params"],
+            type: "object"
+          }],
+          "$defs": {
+            ClientPresentationPiParams: {
+              additionalProperties: false,
+              properties: {session: {type: "string"}},
+              required: ["session"],
+              type: "object"
+            }
+          }
+        },
+        success_response: {
+          properties: {
+            id: {type: "string"},
+            result: {"$ref": "#/schemas/success_response/$defs/ResponseResult"}
+          },
+          required: ["id", "result"],
+          type: "object",
+          "$defs": {
+            ResponseResult: {
+              oneOf: [{
+                properties: {
+                  client_id: {format: "uint64", minimum: 0, type: "integer"},
+                  session: {type: "string"},
+                  tokens: {"$ref": "#/schemas/success_response/$defs/ClientPresentationPiTokens"},
+                  type: {const: "client_presentation_pi", type: "string"}
+                },
+                required: ["type", "session", "client_id", "tokens"],
+                type: "object"
+              }]
+            },
+            ClientPresentationPiTokens: {
+              items: {
+                items: {"$ref": "#/schemas/success_response/$defs/AgentSidebarToken"},
+                type: "array"
+              },
+              type: ["array", "null"]
+            },
+            AgentSidebarToken: {}
+          }
+        }
+      }
+    }
+  '
+}
+
+pi_presentation_status() {
+  jq -nc --arg session "${1:-fmtest}" '{
+    server: {running: true, compatible: true, session: $session},
+    client: {session: $session}
+  }'
+}
+
+pi_presentation_response() {
+  jq -nc --arg session "${1:-fmtest}" '{
+    id: "fm-client-presentation-pi",
+    result: {
+      type: "client_presentation_pi",
+      session: $session,
+      client_id: 17,
+      tokens: [["state_icon", "agent", "tab"], ["state_text", "$nm_summary"]]
+    }
+  }'
+}
+
+run_pi_presentation_probe() ( # <status> <schema> <response> [reader-status]
+  local fake_status=$1 fake_schema=$2 fake_response=$3 reader_status=${4:-0}
+  fm_backend_herdr_cli() {
+    case "${2:-} ${3:-}" in
+      "status --json") printf '%s\n' "$fake_status" ;;
+      "api schema")
+        [ "${4:-}" = --json ] || return 1
+        printf '%s\n' "$fake_schema"
+        ;;
+      *) return 1 ;;
+    esac
+  }
+  fm_backend_herdr_socket_path() {
+    [ "$1" = fmtest ] || return 1
+    printf '/tmp/fmtest-herdr.sock\n'
+  }
+  python3() {
+    [ "$1" = - ] && [ "$2" = /tmp/fmtest-herdr.sock ] && [ "$3" = fmtest ] || return 1
+    [ "$reader_status" = 0 ] || return "$reader_status"
+    printf '%s\n' "$fake_response"
+  }
+  fm_backend_herdr_pi_prominence_live_probe fmtest
+)
+
+test_pi_prominence_live_api_contract() {
+  local status schema response output changed
+  status=$(pi_presentation_status)
+  schema=$(pi_presentation_schema)
+  response=$(pi_presentation_response)
+
+  output=$(run_pi_presentation_probe "$status" "$schema" "$response")
+  [ "$output" = $'applied\texact-live-pi-row' ] || fail "exact live Pi response was not applied: $output"
+
+  changed=$(printf '%s' "$response" | jq -c '.result.tokens = [["state_icon", "workspace", "tab"], ["agent"]]')
+  output=$(run_pi_presentation_probe "$status" "$schema" "$changed")
+  [ "$output" = $'stale\tdifferent-live-pi-row' ] || fail "valid different live row was not stale: $output"
+
+  changed=$(printf '%s' "$response" | jq -c '.result.tokens = [[{token:"agent", bold:true}]]')
+  output=$(run_pi_presentation_probe "$status" "$schema" "$changed")
+  [ "$output" = $'stale\tdifferent-live-pi-row' ] || fail "canonical styled token row was not stale: $output"
+
+  changed=$(printf '%s' "$response" | jq -c '.result.tokens = []')
+  output=$(run_pi_presentation_probe "$status" "$schema" "$changed")
+  [ "$output" = $'stale\tdifferent-live-pi-row' ] || fail "canonical empty live row was not stale: $output"
+
+  changed=$(printf '%s' "$schema" | jq -c 'del(.schemas.request.oneOf[0])')
+  output=$(run_pi_presentation_probe "$status" "$changed" "$response")
+  [ "$output" = $'unavailable\tlive-api-schema-unverified' ] || fail "old release without the method was accepted: $output"
+
+  changed=$(printf '%s' "$schema" | jq -c 'del(.schemas.success_response."$defs".ResponseResult.oneOf[0].properties.client_id)')
+  output=$(run_pi_presentation_probe "$status" "$changed" "$response")
+  [ "$output" = $'unavailable\tlive-api-schema-unverified' ] || fail "schema missing an exact response field was accepted: $output"
+
+  output=$(run_pi_presentation_probe "$status" "$schema" "$response" 3)
+  [ "$output" = $'unavailable\tlive-sidebar-layout-read-failed' ] || fail "socket invocation failure was not unavailable: $output"
+
+  pass "Herdr Pi prominence capability-detects and invokes only the exact live API contract"
+}
+
+test_pi_prominence_live_socket_request_is_exact() (
+  local fake_status fake_schema fake_socket="$ROOT/.tmp/pi-$$.sock"
+  local capture="$TMP_ROOT/pi-presentation-request.json" ready="$TMP_ROOT/pi-presentation-ready"
+  local server_pid output attempt request
+  fake_status=$(pi_presentation_status)
+  fake_schema=$(pi_presentation_schema)
+  rm -f "$fake_socket" "$capture" "$ready"
+  python3 - "$fake_socket" "$capture" "$ready" <<'PY' &
+import json
+import socket
+import sys
+
+socket_path, capture_path, ready_path = sys.argv[1:]
+with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as server:
+    server.bind(socket_path)
+    server.listen(1)
+    with open(ready_path, "w", encoding="utf-8") as ready:
+        ready.write("ready\n")
+    connection, _ = server.accept()
+    with connection:
+        request = b""
+        while b"\n" not in request:
+            chunk = connection.recv(65536)
+            if not chunk:
+                raise SystemExit(2)
+            request += chunk
+        line = request.split(b"\n", 1)[0]
+        with open(capture_path, "wb") as capture:
+            capture.write(line + b"\n")
+        response = {
+            "id": "fm-client-presentation-pi",
+            "result": {
+                "type": "client_presentation_pi",
+                "session": "fmtest",
+                "client_id": 17,
+                "tokens": [
+                    ["state_icon", "agent", "tab"],
+                    ["state_text", "$nm_summary"],
+                ],
+            },
+        }
+        connection.sendall(
+            (json.dumps(response, separators=(",", ":")) + "\n").encode("utf-8")
+        )
+PY
+  server_pid=$!
+  trap 'kill "$server_pid" 2>/dev/null || true; wait "$server_pid" 2>/dev/null || true; rm -f "$fake_socket"' EXIT HUP INT TERM
+  attempt=0
+  while [ ! -e "$ready" ] && [ "$attempt" -lt 100 ]; do
+    sleep 0.01
+    attempt=$((attempt + 1))
+  done
+  [ -e "$ready" ] || fail "fake Pi presentation socket did not become ready"
+
+  fm_backend_herdr_cli() {
+    case "${2:-} ${3:-}" in
+      "status --json") printf '%s\n' "$fake_status" ;;
+      "api schema") printf '%s\n' "$fake_schema" ;;
+      *) return 1 ;;
+    esac
+  }
+  fm_backend_herdr_socket_path() {
+    [ "$1" = fmtest ] || return 1
+    printf '%s\n' "$fake_socket"
+  }
+  output=$(fm_backend_herdr_pi_prominence_live_probe fmtest)
+  wait "$server_pid" || fail "fake Pi presentation socket failed"
+  trap - EXIT HUP INT TERM
+  rm -f "$fake_socket"
+  [ "$output" = $'applied\texact-live-pi-row' ] || fail "real socket proof was not applied: $output"
+  request=$(cat "$capture")
+  printf '%s' "$request" | jq -e '
+    (keys_unsorted | sort) == ["id", "method", "params"]
+    and .id == "fm-client-presentation-pi"
+    and .method == "client.presentation.pi"
+    and (.params | (keys_unsorted == ["session"]) and .session == "fmtest")
+  ' >/dev/null || fail "live probe did not send the exact read-only named-session request: $request"
+  pass "Herdr Pi prominence sends one exact read-only request over the named-session socket"
+)
+
+test_pi_prominence_live_response_refuses_ambiguity() {
+  local status schema response output code
+  status=$(pi_presentation_status)
+  schema=$(pi_presentation_schema)
+  for code in invalid_params no_attached_client ambiguous_clients session_mismatch invalid_client_presentation; do
+    response=$(jq -nc --arg code "$code" '{
+      id: "fm-client-presentation-pi",
+      error: {code: $code, message: "bounded diagnostic"}
+    }')
+    output=$(run_pi_presentation_probe "$status" "$schema" "$response")
+    [ "$output" = "unavailable"$'\t'"live-sidebar-layout-$code" ] \
+      || fail "$code response was not unavailable: $output"
+  done
+  pass "Herdr Pi prominence refuses no-client, multiple-client, session-mismatch, and invalid-client ambiguity"
+}
+
+test_pi_prominence_live_response_is_strict_and_hostile_safe() {
+  local status schema response changed output marker="$TMP_ROOT/hostile-live-probe"
+  status=$(pi_presentation_status)
+  schema=$(pi_presentation_schema)
+  response=$(pi_presentation_response)
+
+  for changed in \
+    'not-json' \
+    "{} $response" \
+    "$(printf '%s' "$response" | jq -c '.extra = true')" \
+    "$(printf '%s' "$response" | jq -c '.result.session = "other"')" \
+    "$(printf '%s' "$response" | jq -c '.result.client_id = "17"')" \
+    "$(printf '%s' "$response" | jq -c '.result.client_id = null')" \
+    "$(printf '%s' "$response" | jq -c '.result.tokens = null')" \
+    "$(printf '%s' "$response" | jq -c '.result.tokens = [["unknown_token"]]')" \
+    "$(printf '%s' "$response" | jq -c '.result.tokens = [[{token:"agent", unknown:true}]]')" \
+    "$(printf '%s' "$response" | jq -c '.result.tokens = [(range(0;17) | ["agent"])]')"; do
+    output=$(run_pi_presentation_probe "$status" "$schema" "$changed")
+    [ "$output" = $'unavailable\tlive-sidebar-layout-response-unverified' ] \
+      || fail "malformed live response was accepted: $output"
+  done
+
+  changed=$(jq -nc --arg hostile "\$(touch $marker)\n/private/config/path" '{
+    id: "fm-client-presentation-pi",
+    error: {code: $hostile, message: $hostile}
+  }')
+  output=$(run_pi_presentation_probe "$status" "$schema" "$changed")
+  [ "$output" = $'unavailable\tlive-sidebar-layout-response-unverified' ] \
+    || fail "hostile error changed the allowlisted result: $output"
+  [ ! -e "$marker" ] || fail "hostile live response content was executed"
+  assert_not_contains "$output" '/private/config/path' "hostile live response leaked a path"
+
+  pass "Herdr Pi prominence rejects malformed identities, fields, tokens, and hostile payloads"
+}
+
 test_pi_prominence_requires_live_applied_state() (
   local status output backend_source
   FM_FAKE_PI_LIVE_STATE=applied
@@ -480,7 +746,7 @@ test_pi_worker_name_refuses_non_pi_identity() {
 }
 
 test_spawn_applies_pi_name_after_launch_only_on_herdr() {
-  local source enter_line condition_line rename_line success_line
+  local source enter_line condition_line rename_line success_line pre_live_line post_live_line create_line
   source=$(cat "$ROOT/bin/fm-spawn.sh")
   assert_contains "$source" 'if [ "$BACKEND" = herdr ] && [ "$HARNESS" = pi ]; then' "spawn lost the Herdr+Pi-only naming condition"
   assert_contains "$source" 'fm_backend_herdr_pi_prominent_configured' "spawn does not preflight the prominent Pi presentation config"
@@ -495,11 +761,17 @@ test_spawn_applies_pi_name_after_launch_only_on_herdr() {
   enter_line=$(grep -nF 'spawn_send_key "$T" Enter' "$ROOT/bin/fm-spawn.sh" | tail -1 | cut -d: -f1)
   condition_line=$(grep -nF 'if [ "$BACKEND" = herdr ] && [ "$HARNESS" = pi ]; then' "$ROOT/bin/fm-spawn.sh" | tail -1 | cut -d: -f1)
   rename_line=$(grep -nF 'fm_backend_herdr_name_pi_worker "$T" "$HERDR_PI_NAME"' "$ROOT/bin/fm-spawn.sh" | tail -1 | cut -d: -f1)
+  pre_live_line=$(grep -nF 'fm_backend_herdr_pi_prominence_live_verify "$HERDR_SES"' "$ROOT/bin/fm-spawn.sh" | head -1 | cut -d: -f1)
+  post_live_line=$(grep -nF 'fm_backend_herdr_pi_prominence_live_verify "$HERDR_SES"' "$ROOT/bin/fm-spawn.sh" | tail -1 | cut -d: -f1)
+  create_line=$(grep -nF 'fm_backend_herdr_create_task "$CONTAINER" "$W" "$PROJ_ABS"' "$ROOT/bin/fm-spawn.sh" | head -1 | cut -d: -f1)
   success_line=$(grep -nF 'echo "spawned $ID harness=' "$ROOT/bin/fm-spawn.sh" | tail -1 | cut -d: -f1)
+  [ "$pre_live_line" -lt "$create_line" ] || fail "live Pi refusal no longer occurs before zero-resource task creation"
   [ "$enter_line" -lt "$condition_line" ] || fail "Pi naming ran before the worker launch was submitted"
   [ "$condition_line" -lt "$rename_line" ] || fail "Pi naming call escaped its Herdr+Pi condition"
+  [ "$rename_line" -lt "$post_live_line" ] || fail "post-rename live Pi proof no longer follows the exact rename"
+  [ "$post_live_line" -lt "$success_line" ] || fail "spawn reported success before post-rename live Pi proof"
   [ "$rename_line" -lt "$success_line" ] || fail "spawn reported success before attempting the Pi name"
-  pass "new Herdr-backed Pi workers receive their task name after launch and before spawn success"
+  pass "Herdr-backed Pi keeps zero-resource preflight and post-rename proof before spawn success"
 }
 
 test_pi_identity_rollback_restores_metadata_on_failure() {
@@ -745,6 +1017,10 @@ test_non_herdr_backend_is_unchanged
 test_pi_worker_name_is_unique_and_verified
 test_pi_worker_name_refuses_non_pi_identity
 test_pi_prominence_requires_exact_valid_config
+test_pi_prominence_live_api_contract
+test_pi_prominence_live_socket_request_is_exact
+test_pi_prominence_live_response_refuses_ambiguity
+test_pi_prominence_live_response_is_strict_and_hostile_safe
 test_pi_prominence_requires_live_applied_state
 test_spawn_applies_pi_name_after_launch_only_on_herdr
 test_pi_identity_rollback_restores_metadata_on_failure

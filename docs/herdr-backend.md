@@ -78,8 +78,12 @@ pi = [["state_icon", "agent", "tab"], ["state_text", "$nm_summary"]]
 Firstmate never edits, reloads, or restarts the operator's Herdr config or TUI automatically.
 It validates the config file as a prerequisite but never treats disk config alone as proof of the running client's presentation.
 A Herdr-backed Pi spawn proceeds only when the adapter can also verify that the running session has applied the exact task-name-first Pi row, both before task creation and after the unique rename.
-Herdr 0.7.4 protocol 16 exposes no live TUI sidebar-layout read, so the current adapter refuses the spawn even when the config file is valid rather than silently accepting an unverified generic identity.
-The non-destructive remediation is to use a Herdr release with exact live sidebar-layout verification, wait until the entire Firstmate fleet using that session is idle, perform one planned Herdr TUI reload or restart, and retry the spawn.
+The adapter capability-detects the exact `client.presentation.pi` request and `client_presentation_pi` response fields from `herdr api schema --json`; no version or protocol number enables the path.
+It then sends only that read-only request to the exact named session and accepts only one exact response with the same session, a non-empty client identity, and canonical Pi token arrays.
+The required row returns applied, another valid row returns stale, and an absent method, old server, missing or ambiguous client, identity mismatch, malformed response, invocation failure, or noncanonical token returns unavailable.
+Herdr 0.7.4 and the currently installed Herdr 0.8.0 do not expose this API, so they still refuse a Herdr-backed Pi spawn even when the disk configuration is valid.
+The non-destructive remediation is to use a Herdr release with the exact live API, wait until the entire Firstmate fleet using that session is idle, perform one planned Herdr TUI reload or restart, and retry the spawn.
+Disk configuration, reload acknowledgement, process version, restart state, labels, screenshots, rename success, timing, and absence of errors never count as live proof.
 The override uses only Herdr's documented canonical `pi` row selector, built-in `agent` and `tab` values, and the custom metadata token `$nm_summary`.
 When no review is active, the optional custom token is elided and the second row still shows Pi's native state text.
 

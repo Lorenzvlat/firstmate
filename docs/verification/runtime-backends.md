@@ -157,6 +157,34 @@ Two agents retained different names and pane ids inside one exact `firstmate` wo
 `agent rename` returned the unchanged canonical `agent: pi` plus the new task-specific `name`, and Herdr rejected a duplicate name with `agent_name_taken`.
 The strict live-boundary regression therefore rejects the headless 0.7.4 session as unavailable even after `config check` succeeds, and spawn remediation never reloads or restarts Herdr automatically.
 
+On 2026-08-31, the merged personal Herdr commit `fc8573cc` was inspected read-only at `/Users/lorenzlat/lorenz-agent-workspace/projects/herdr`.
+Its generated schema defines the exact `client.presentation.pi` request with one required `session` parameter and the exact `client_presentation_pi` response with required `session`, `client_id`, and canonical `tokens` fields.
+Its server implementation returns stable `session_mismatch`, `no_attached_client`, `ambiguous_clients`, and `invalid_client_presentation` errors rather than selecting an ambiguous client.
+The Firstmate consumer was validated synthetically because the task's Herdr lifecycle declaration was not enabled and the installed Herdr 0.8.0 does not contain the merged personal API.
+
+```sh
+git -C /Users/lorenzlat/lorenz-agent-workspace/projects/herdr show \
+  fc8573cc:docs/next/api/herdr-api.schema.json \
+  | jq '.. | objects | select(.properties?.type?.const? == "client_presentation_pi")'
+TMPDIR="$PWD/.tmp" tests/fm-herdr-nm-visibility.test.sh
+```
+
+Observed focused contract output:
+
+```text
+ok - Herdr Pi prominence capability-detects and invokes only the exact live API contract
+ok - Herdr Pi prominence sends one exact read-only request over the named-session socket
+ok - Herdr Pi prominence refuses no-client, multiple-client, session-mismatch, and invalid-client ambiguity
+ok - Herdr Pi prominence rejects malformed identities, fields, tokens, and hostile payloads
+ok - Herdr Pi prominence requires live-applied proof and fails stale or unavailable states with idle-fleet remediation
+ok - Herdr-backed Pi keeps zero-resource preflight and post-rename proof before spawn success
+ok - failed Pi identity rollback retains metadata for deterministic recovery
+ok - secondmate Pi identity rollback preserves its persistent home
+```
+
+The bounded real deployment prerequisite is a separately dispatched `--herdr-lab` run using the merged fork build through the existing named-session helper, with an attached full-app client and the default-session tripwire intact.
+That run must not install, update, restart, reload, stop, or otherwise mutate the captain's running default Herdr session.
+
 The focused privacy, attribution, capability-fallback, lifecycle, and cleanup regressions are:
 
 ```sh
