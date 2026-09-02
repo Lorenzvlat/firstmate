@@ -236,7 +236,32 @@ fm_backend_herdr_pi_prominence_live_probe() { # <session>
       and (.schemas.success_response["$defs"].ClientPresentationPiTokens.items.type
         == "array")
       and (.schemas.success_response["$defs"].ClientPresentationPiTokens.items.items["$ref"]
-        == "#/schemas/success_response/$defs/AgentSidebarToken"))
+        == "#/schemas/success_response/$defs/AgentSidebarToken")
+      and (.schemas.success_response["$defs"].AgentSidebarToken == {
+        "oneOf": [
+          {
+            "pattern": "^(state_icon|state_text|workspace|tab|pane|agent|terminal_title|terminal_title_stripped|\\$[A-Za-z0-9_-]{1,32})$",
+            "type": "string"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "bold": {"type":"boolean"},
+              "dim": {"type":"boolean"},
+              "fg": {
+                "pattern": "^#[A-Fa-f0-9]{3}([A-Fa-f0-9]{3})?$",
+                "type": "string"
+              },
+              "token": {
+                "pattern": "^(state_icon|state_text|workspace|tab|pane|agent|terminal_title|terminal_title_stripped|\\$[A-Za-z0-9_-]{1,32})$",
+                "type": "string"
+              }
+            },
+            "required": ["token"],
+            "type": "object"
+          }
+        ]
+      }))
   ' >/dev/null 2>&1; then
     printf 'unavailable\tlive-api-schema-unverified\n'
     return 0
@@ -308,7 +333,30 @@ except (OSError, socket.timeout):
 line = bytes(buffer).split(b"\n", 1)[0]
 if not line or len(line) > MAX_RESPONSE_BYTES:
     raise SystemExit(4)
-sys.stdout.buffer.write(line + b"\n")
+
+def unique_object(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("duplicate object key")
+        result[key] = value
+    return result
+
+try:
+    payload = json.loads(line, object_pairs_hook=unique_object)
+except (UnicodeDecodeError, ValueError):
+    sys.stdout.write("{}\n")
+    raise SystemExit(0)
+if isinstance(payload, dict) and isinstance(payload.get("result"), dict):
+    client_id = payload["result"].get("client_id")
+    if (
+        isinstance(client_id, bool)
+        or not isinstance(client_id, int)
+        or not 0 <= client_id <= 18446744073709551615
+    ):
+        sys.stdout.write("{}\n")
+        raise SystemExit(0)
+sys.stdout.write(json.dumps(payload, separators=(",", ":")) + "\n")
 PY
   ) || {
     printf 'unavailable\tlive-sidebar-layout-read-failed\n'

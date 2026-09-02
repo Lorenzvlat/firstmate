@@ -470,7 +470,28 @@ pi_presentation_schema() {
               },
               type: ["array", "null"]
             },
-            AgentSidebarToken: {}
+            AgentSidebarToken: {
+              oneOf: [
+                {
+                  pattern: "^(state_icon|state_text|workspace|tab|pane|agent|terminal_title|terminal_title_stripped|\\$[A-Za-z0-9_-]{1,32})$",
+                  type: "string"
+                },
+                {
+                  additionalProperties: false,
+                  properties: {
+                    bold: {type: "boolean"},
+                    dim: {type: "boolean"},
+                    fg: {pattern: "^#[A-Fa-f0-9]{3}([A-Fa-f0-9]{3})?$", type: "string"},
+                    token: {
+                      pattern: "^(state_icon|state_text|workspace|tab|pane|agent|terminal_title|terminal_title_stripped|\\$[A-Za-z0-9_-]{1,32})$",
+                      type: "string"
+                    }
+                  },
+                  required: ["token"],
+                  type: "object"
+                }
+              ]
+            }
           }
         }
       }
@@ -499,6 +520,8 @@ pi_presentation_response() {
 
 run_pi_presentation_probe() ( # <status> <schema> <response> [reader-status]
   local fake_status=$1 fake_schema=$2 fake_response=$3 reader_status=${4:-0}
+  local python_bin
+  python_bin=$(command -v python3)
   fm_backend_herdr_cli() {
     case "${2:-} ${3:-}" in
       "status --json") printf '%s\n' "$fake_status" ;;
@@ -516,7 +539,20 @@ run_pi_presentation_probe() ( # <status> <schema> <response> [reader-status]
   python3() {
     [ "$1" = - ] && [ "$2" = /tmp/fmtest-herdr.sock ] && [ "$3" = fmtest ] || return 1
     [ "$reader_status" = 0 ] || return "$reader_status"
-    printf '%s\n' "$fake_response"
+    "$python_bin" -c '
+import json, sys
+try:
+    value = json.loads(sys.argv[1])
+except ValueError:
+    print("{}")
+    raise SystemExit(0)
+if isinstance(value, dict) and isinstance(value.get("result"), dict):
+    client_id = value["result"].get("client_id")
+    if isinstance(client_id, bool) or not isinstance(client_id, int) or not 0 <= client_id <= 18446744073709551615:
+        print("{}")
+        raise SystemExit(0)
+print(json.dumps(value, separators=(",", ":")))
+' "$fake_response"
   }
   fm_backend_herdr_pi_prominence_live_probe fmtest
 )
@@ -549,6 +585,14 @@ test_pi_prominence_live_api_contract() {
   changed=$(printf '%s' "$schema" | jq -c 'del(.schemas.success_response."$defs".ResponseResult.oneOf[0].properties.client_id)')
   output=$(run_pi_presentation_probe "$status" "$changed" "$response")
   [ "$output" = $'unavailable\tlive-api-schema-unverified' ] || fail "schema missing an exact response field was accepted: $output"
+
+  changed=$(printf '%s' "$schema" | jq -c '.schemas.success_response."$defs".AgentSidebarToken.oneOf[0].pattern = "^agent$"')
+  output=$(run_pi_presentation_probe "$status" "$changed" "$response")
+  [ "$output" = $'unavailable\tlive-api-schema-unverified' ] || fail "changed token schema was accepted: $output"
+
+  changed=$(printf '%s' "$schema" | jq -c 'del(.schemas.success_response."$defs".AgentSidebarToken)')
+  output=$(run_pi_presentation_probe "$status" "$changed" "$response")
+  [ "$output" = $'unavailable\tlive-api-schema-unverified' ] || fail "missing token schema was accepted: $output"
 
   output=$(run_pi_presentation_probe "$status" "$schema" "$response" 3)
   [ "$output" = $'unavailable\tlive-sidebar-layout-read-failed' ] || fail "socket invocation failure was not unavailable: $output"
@@ -665,6 +709,7 @@ test_pi_prominence_live_response_is_strict_and_hostile_safe() {
     "$(printf '%s' "$response" | jq -c '.result.session = "other"')" \
     "$(printf '%s' "$response" | jq -c '.result.client_id = "17"')" \
     "$(printf '%s' "$response" | jq -c '.result.client_id = null')" \
+    "${response/\"client_id\":17/\"client_id\":18446744073709551616}" \
     "$(printf '%s' "$response" | jq -c '.result.tokens = null')" \
     "$(printf '%s' "$response" | jq -c '.result.tokens = [["unknown_token"]]')" \
     "$(printf '%s' "$response" | jq -c '.result.tokens = [[{token:"agent", unknown:true}]]')" \
@@ -673,6 +718,11 @@ test_pi_prominence_live_response_is_strict_and_hostile_safe() {
     [ "$output" = $'unavailable\tlive-sidebar-layout-response-unverified' ] \
       || fail "malformed live response was accepted: $output"
   done
+
+  changed=${response/"client_id":17/"client_id":18446744073709551615}
+  output=$(run_pi_presentation_probe "$status" "$schema" "$changed")
+  [ "$output" = $'applied\texact-live-pi-row' ] \
+    || fail "maximum uint64 client identity was rejected: $output"
 
   changed=$(jq -nc --arg hostile "\$(touch $marker)\n/private/config/path" '{
     id: "fm-client-presentation-pi",
