@@ -14,7 +14,7 @@ Prerequisites:
 - Herdr protocol 14 or newer, installed from [herdr.dev](https://herdr.dev).
 - `jq` for JSON responses.
 - The universal harness and toolchain requirements in [`configuration.md`](configuration.md#toolchain).
-- `python3` only for optional protocol-16 presentation-space ordering and native event subscription.
+- `python3` for Herdr-backed Pi live-presentation proof, optional protocol-16 presentation-space ordering, and native event subscription.
 
 Herdr is dual-licensed AGPL-3.0-or-later or commercial.
 Firstmate invokes its CLI as a separate process.
@@ -25,6 +25,7 @@ A tmux pane nested inside Herdr resolves to tmux because the innermost multiplex
 An auto-detected Herdr spawn prints an opt-out notice.
 
 Spawn stops before creating a Herdr container or acquiring a task worktree when `herdr`, `jq`, or the protocol floor is unavailable.
+A Herdr-backed Pi spawn also stops before task creation when `python3` or the exact live-presentation API is unavailable.
 No separate first-run provisioning is required.
 
 The required CI lane uses the pinned installers in `bin/fm-install-herdr.sh` and `bin/fm-install-treehouse.sh`.
@@ -79,7 +80,7 @@ Firstmate never edits, reloads, or restarts the operator's Herdr config or TUI a
 It validates the config file as a prerequisite but never treats disk config alone as proof of the running client's presentation.
 A Herdr-backed Pi spawn proceeds only when the adapter can also verify that the running session has applied the exact task-name-first Pi row, both before task creation and after the unique rename.
 The adapter capability-detects the exact `client.presentation.pi` request and `client_presentation_pi` response fields from `herdr api schema --json`; no version or protocol number enables the path.
-It then sends only that read-only request to the exact named session and accepts only one exact response with the same session, a non-empty client identity, and canonical Pi token arrays.
+It then sends only that read-only request to the exact named session and accepts only one exact response from one attached full-app client with the same session, a valid unsigned 64-bit client identity, and canonical Pi token arrays.
 The required row returns applied, another valid row returns stale, and an absent method, old server, missing or ambiguous client, identity mismatch, malformed response, invocation failure, or noncanonical token returns unavailable.
 Herdr 0.7.4 and the currently installed Herdr 0.8.0 do not expose this API, so they still refuse a Herdr-backed Pi spawn even when the disk configuration is valid.
 The non-destructive remediation is to use a Herdr release with the exact live API, wait until the entire Firstmate fleet using that session is idle, perform one planned Herdr TUI reload or restart, and retry the spawn.
