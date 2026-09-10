@@ -522,6 +522,7 @@ run_pi_presentation_probe() ( # <status> <schema> <response> [reader-status]
   local fake_status=$1 fake_schema=$2 fake_response=$3 reader_status=${4:-0}
   local python_bin
   python_bin=$(command -v python3)
+  # shellcheck disable=SC2329 # Invoked indirectly by the sourced backend probe.
   fm_backend_herdr_cli() {
     case "${2:-} ${3:-}" in
       "status --json") printf '%s\n' "$fake_status" ;;
@@ -532,10 +533,12 @@ run_pi_presentation_probe() ( # <status> <schema> <response> [reader-status]
       *) return 1 ;;
     esac
   }
+  # shellcheck disable=SC2329 # Invoked indirectly by the sourced backend probe.
   fm_backend_herdr_socket_path() {
     [ "$1" = fmtest ] || return 1
     printf '/tmp/fmtest-herdr.sock\n'
   }
+  # shellcheck disable=SC2329 # Invoked indirectly by the sourced backend probe.
   python3() {
     [ "$1" = - ] && [ "$2" = /tmp/fmtest-herdr.sock ] && [ "$3" = fmtest ] || return 1
     [ "$reader_status" = 0 ] || return "$reader_status"
@@ -654,6 +657,7 @@ PY
   done
   [ -e "$ready" ] || fail "fake Pi presentation socket did not become ready"
 
+  # shellcheck disable=SC2329 # Invoked indirectly by the sourced backend probe.
   fm_backend_herdr_cli() {
     case "${2:-} ${3:-}" in
       "status --json") printf '%s\n' "$fake_status" ;;
@@ -661,6 +665,7 @@ PY
       *) return 1 ;;
     esac
   }
+  # shellcheck disable=SC2329 # Invoked indirectly by the sourced backend probe.
   fm_backend_herdr_socket_path() {
     [ "$1" = fmtest ] || return 1
     printf '%s\n' "$fake_socket"
