@@ -820,7 +820,11 @@ SH
 #!/usr/bin/env bash
 exit 0
 SH
-  chmod +x "$repo/bin/fm-turnend-guard.sh" "$repo/bin/fm-arm-pretool-check.sh"
+  cat > "$repo/bin/fm-cd-pretool-check.sh" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  chmod +x "$repo/bin/fm-turnend-guard.sh" "$repo/bin/fm-arm-pretool-check.sh" "$repo/bin/fm-cd-pretool-check.sh"
   out=$(PLUGIN="$ext" FM_HOME="$home" FM_GUARD_LOG="$log" node --input-type=module 2>&1 <<'EOF'
 import { readFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
@@ -843,15 +847,16 @@ const pi = {
 };
 const mod = await import(pathToFileURL(process.env.PLUGIN).href);
 mod.default(pi);
-if (handlers.has("turn_end")) throw new Error("guard still treats internal Pi turns as logical runs");
 const settled = handlers.get("agent_settled");
 if (!settled) throw new Error("agent_settled handler was not registered");
+const toolCall = handlers.get("tool_call");
+if (!toolCall) throw new Error("tool_call handler was not registered");
 
 await settled({ type: "agent_settled" }, {});
 if (prompts !== 1) throw new Error(`no-tool run injected ${prompts} follow-ups`);
 
 for (let i = 0; i < 3; i += 1) {
-  await handlers.get("turn_end")?.({ type: "turn_end", turnIndex: i }, {});
+  await toolCall({ type: "tool_call", toolName: "bash", input: { command: `printf tool-${i}` } }, {});
 }
 await settled({ type: "agent_settled" }, {});
 if (prompts !== 2) throw new Error(`multi-tool run produced ${prompts - 1} follow-ups`);

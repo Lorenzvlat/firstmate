@@ -155,38 +155,271 @@ fm_backend_herdr_pi_prominent_configured() {
 #   applied<TAB><reason>      exact task-name-first row is live
 #   stale<TAB><reason>        live row is known but does not match config
 #   unavailable<TAB><reason>  no exact live-client read is available
-# Herdr 0.7.4 protocol 16 has server.reload_config and window-title client
-# methods, but no live TUI sidebar-layout read, so it can never claim applied.
-# A future adapter may return applied only from an exact live-client response;
-# disk config, a server reload response, and a successful agent rename are not
-# sufficient. Tests override this narrow probe to exercise all three states.
+# Herdr 0.7.4 through the installed 0.8.0 lack this capability and can never
+# claim applied. Capability is detected from the exact request and response
+# schema, never a version. The fixed raw-socket request then binds canonical
+# tokens to one attached full-app client in the exact named session.
 fm_backend_herdr_pi_prominence_live_probe() { # <session>
-  local session=$1 status schema
-  status=$(fm_backend_herdr_cli "$session" status --json 2>/dev/null) || {
+  local session=$1 status schema socket response error_code bytes
+  local request_id=fm-client-presentation-pi
+  status=$(set -o pipefail; fm_backend_herdr_cli "$session" status --json 2>/dev/null \
+    | LC_ALL=C head -c 65537) || {
     printf 'unavailable\tlive-session-status-unreadable\n'
     return 0
   }
-  if ! printf '%s' "$status" | jq -e --arg session "$session" '
-    .server.running == true
-    and .server.compatible == true
-    and .server.session == $session
-    and .client.session == $session
+  bytes=$(printf '%s' "$status" | LC_ALL=C wc -c | tr -d '[:space:]')
+  [ "$bytes" -le 65536 ] || {
+    printf 'unavailable\tlive-session-status-unreadable\n'
+    return 0
+  }
+  if ! printf '%s' "$status" | jq -s -e --arg session "$session" '
+    length == 1
+    and (.[0]
+      | .server.running == true
+      and .server.compatible == true
+      and .server.session == $session
+      and .client.session == $session)
   ' >/dev/null 2>&1; then
     printf 'unavailable\tlive-session-status-unverified\n'
     return 0
   fi
-  schema=$(fm_backend_herdr_cli "$session" api schema --json 2>/dev/null) || {
+  schema=$(set -o pipefail; fm_backend_herdr_cli "$session" api schema --json 2>/dev/null \
+    | LC_ALL=C head -c 2097153) || {
     printf 'unavailable\tlive-api-schema-unreadable\n'
     return 0
   }
-  if ! printf '%s' "$schema" | jq -e '
-    [.schemas.request.oneOf[]?.properties.method.const]
-    | type == "array"
+  bytes=$(printf '%s' "$schema" | LC_ALL=C wc -c | tr -d '[:space:]')
+  [ "$bytes" -le 2097152 ] || {
+    printf 'unavailable\tlive-api-schema-unreadable\n'
+    return 0
+  }
+  if ! printf '%s' "$schema" | jq -s -e '
+    def exact_keys($want):
+      type == "object" and ((keys_unsorted | sort) == ($want | sort));
+    def exact_required($want):
+      type == "array" and ((sort) == ($want | sort));
+    def pi_request:
+      type == "object"
+      and .type == "object"
+      and (.properties | exact_keys(["method", "params"]))
+      and (.required | exact_required(["method", "params"]))
+      and .properties.method == {"const":"client.presentation.pi","type":"string"}
+      and .properties.params == {"$ref":"#/schemas/request/$defs/ClientPresentationPiParams"};
+    def pi_result:
+      type == "object"
+      and .type == "object"
+      and (.properties | exact_keys(["type", "session", "client_id", "tokens"]))
+      and (.required | exact_required(["type", "session", "client_id", "tokens"]))
+      and .properties.type == {"const":"client_presentation_pi","type":"string"}
+      and .properties.session == {"type":"string"}
+      and .properties.client_id == {"format":"uint64","minimum":0,"type":"integer"}
+      and .properties.tokens["$ref"] == "#/schemas/success_response/$defs/ClientPresentationPiTokens";
+    length == 1
+    and (.[0]
+      | (.schemas.request["$defs"].ClientPresentationPiParams
+        | .type == "object"
+        and .additionalProperties == false
+        and (.properties | exact_keys(["session"]))
+        and (.required | exact_required(["session"]))
+        and .properties.session.type == "string")
+      and ([.schemas.request.oneOf[]? | select(pi_request)] | length == 1)
+      and (.schemas.success_response.type == "object")
+      and (.schemas.success_response.properties | exact_keys(["id", "result"]))
+      and (.schemas.success_response.required | exact_required(["id", "result"]))
+      and (.schemas.success_response.properties.id == {"type":"string"})
+      and (.schemas.success_response.properties.result["$ref"]
+        == "#/schemas/success_response/$defs/ResponseResult")
+      and ([.schemas.success_response["$defs"].ResponseResult.oneOf[]?
+        | select(pi_result)] | length == 1)
+      and (.schemas.success_response["$defs"].ClientPresentationPiTokens.type
+        == ["array", "null"])
+      and (.schemas.success_response["$defs"].ClientPresentationPiTokens.items.type
+        == "array")
+      and (.schemas.success_response["$defs"].ClientPresentationPiTokens.items.items["$ref"]
+        == "#/schemas/success_response/$defs/AgentSidebarToken")
+      and (.schemas.success_response["$defs"].AgentSidebarToken == {
+        "oneOf": [
+          {
+            "pattern": "^(state_icon|state_text|workspace|tab|pane|agent|terminal_title|terminal_title_stripped|\\$[A-Za-z0-9_-]{1,32})$",
+            "type": "string"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "bold": {"type":"boolean"},
+              "dim": {"type":"boolean"},
+              "fg": {
+                "pattern": "^#[A-Fa-f0-9]{3}([A-Fa-f0-9]{3})?$",
+                "type": "string"
+              },
+              "token": {
+                "pattern": "^(state_icon|state_text|workspace|tab|pane|agent|terminal_title|terminal_title_stripped|\\$[A-Za-z0-9_-]{1,32})$",
+                "type": "string"
+              }
+            },
+            "required": ["token"],
+            "type": "object"
+          }
+        ]
+      }))
   ' >/dev/null 2>&1; then
     printf 'unavailable\tlive-api-schema-unverified\n'
     return 0
   fi
-  printf 'unavailable\tlive-sidebar-layout-read-unsupported\n'
+  command -v python3 >/dev/null 2>&1 || {
+    printf 'unavailable\tlive-sidebar-layout-read-unavailable\n'
+    return 0
+  }
+  socket=$(fm_backend_herdr_socket_path "$session") || socket=
+  case "$socket" in
+    /*) ;;
+    *)
+      printf 'unavailable\tlive-session-socket-unverified\n'
+      return 0
+      ;;
+  esac
+  case "$socket" in
+    *$'\t'*|*$'\r'*|*$'\n'*)
+      printf 'unavailable\tlive-session-socket-unverified\n'
+      return 0
+      ;;
+  esac
+  response=$(python3 - "$socket" "$session" <<'PY' 2>/dev/null
+import json
+import socket
+import sys
+import time
+
+MAX_RESPONSE_BYTES = 1024 * 1024
+REQUEST_ID = "fm-client-presentation-pi"
+TIMEOUT_SECONDS = 5.0
+
+if len(sys.argv) != 3:
+    raise SystemExit(2)
+socket_path, session = sys.argv[1:]
+if not socket_path.startswith("/") or not session or len(session) > 128:
+    raise SystemExit(2)
+if any(character in session for character in "\x00\t\r\n"):
+    raise SystemExit(2)
+
+request = {
+    "id": REQUEST_ID,
+    "method": "client.presentation.pi",
+    "params": {"session": session},
+}
+deadline = time.monotonic() + TIMEOUT_SECONDS
+try:
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
+        connection.settimeout(TIMEOUT_SECONDS)
+        connection.connect(socket_path)
+        connection.sendall(
+            (json.dumps(request, separators=(",", ":")) + "\n").encode("utf-8")
+        )
+        buffer = bytearray()
+        while b"\n" not in buffer:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise SystemExit(3)
+            connection.settimeout(remaining)
+            chunk = connection.recv(65536)
+            if not chunk:
+                raise SystemExit(3)
+            buffer.extend(chunk)
+            if len(buffer) > MAX_RESPONSE_BYTES:
+                raise SystemExit(4)
+except (OSError, socket.timeout):
+    raise SystemExit(3)
+
+line = bytes(buffer).split(b"\n", 1)[0]
+if not line or len(line) > MAX_RESPONSE_BYTES:
+    raise SystemExit(4)
+
+def unique_object(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("duplicate object key")
+        result[key] = value
+    return result
+
+try:
+    payload = json.loads(line, object_pairs_hook=unique_object)
+except (UnicodeDecodeError, ValueError):
+    sys.stdout.write("{}\n")
+    raise SystemExit(0)
+if isinstance(payload, dict) and isinstance(payload.get("result"), dict):
+    client_id = payload["result"].get("client_id")
+    if (
+        isinstance(client_id, bool)
+        or not isinstance(client_id, int)
+        or not 0 <= client_id <= 18446744073709551615
+    ):
+        sys.stdout.write("{}\n")
+        raise SystemExit(0)
+sys.stdout.write(json.dumps(payload, separators=(",", ":")) + "\n")
+PY
+  ) || {
+    printf 'unavailable\tlive-sidebar-layout-read-failed\n'
+    return 0
+  }
+  if printf '%s' "$response" | jq -s -e --arg id "$request_id" --arg session "$session" '
+    def exact_keys($want):
+      type == "object" and ((keys_unsorted | sort) == ($want | sort));
+    def token_name:
+      type == "string"
+      and test("^(state_icon|state_text|workspace|tab|pane|agent|terminal_title|terminal_title_stripped|\\$[A-Za-z0-9_-]{1,32})$");
+    def token:
+      token_name
+      or (type == "object"
+        and (keys_unsorted - ["token", "fg", "bold", "dim"] | length == 0)
+        and has("token")
+        and (.token | token_name)
+        and ((has("fg") | not) or (.fg | type == "string" and test("^#[A-Fa-f0-9]{3}([A-Fa-f0-9]{3})?$")))
+        and ((has("bold") | not) or (.bold | type == "boolean"))
+        and ((has("dim") | not) or (.dim | type == "boolean")));
+    def canonical_tokens:
+      type == "array"
+      and length <= 16
+      and all(.[]; type == "array" and length <= 16 and all(.[]; token));
+    length == 1
+    and (.[0]
+      | exact_keys(["id", "result"])
+      and .id == $id
+      and (.result | exact_keys(["type", "session", "client_id", "tokens"]))
+      and .result.type == "client_presentation_pi"
+      and .result.session == $session
+      and (.result.client_id | type == "number" and . >= 0 and floor == .)
+      and (.result.tokens | canonical_tokens))
+  ' >/dev/null 2>&1; then
+    if printf '%s' "$response" | jq -s -e '
+      length == 1
+      and .[0].result.tokens == [["state_icon","agent","tab"],["state_text","$nm_summary"]]
+    ' >/dev/null 2>&1; then
+      printf 'applied\texact-live-pi-row\n'
+    else
+      printf 'stale\tdifferent-live-pi-row\n'
+    fi
+    return 0
+  fi
+  error_code=$(printf '%s' "$response" | jq -s -r --arg id "$request_id" '
+    def exact_keys($want):
+      type == "object" and ((keys_unsorted | sort) == ($want | sort));
+    select(length == 1)
+    | .[0]
+    | select(exact_keys(["id", "error"]) and .id == $id)
+    | .error
+    | select(exact_keys(["code", "message"]) and (.code | type == "string")
+      and (.message | type == "string" and length <= 4096))
+    | .code
+  ' 2>/dev/null) || error_code=
+  case "$error_code" in
+    invalid_params|session_mismatch|no_attached_client|ambiguous_clients|invalid_client_presentation)
+      printf 'unavailable\tlive-sidebar-layout-%s\n' "$error_code"
+      ;;
+    *)
+      printf 'unavailable\tlive-sidebar-layout-response-unverified\n'
+      ;;
+  esac
 }
 
 fm_backend_herdr_pi_prominence_live_verify() { # <session>
